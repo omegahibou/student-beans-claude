@@ -318,13 +318,18 @@ async function getCode(retailerUrl) {
             code = match.find((m) => !skip.has(m)) || null;
           }
         }
-        // Grab cooldown: "Your next code will be available at X:XXpm"
+        // Grab cooldown: "Your next code will be available at X:XXpm" or "available on DD MMM"
         let cooldown = null;
         if (document.body) {
           const bodyText = document.body.innerText;
-          const cdMatch = bodyText.match(/next code will be available at ([\d:]+\s*[apm]{2})/i) ||
-                          bodyText.match(/available at ([\d:]+\s*[apm]{2})/i);
-          if (cdMatch) cooldown = cdMatch[1].trim();
+          // Try to grab the whole sentence for context (handles times AND dates)
+          const sentenceMatch = bodyText.match(/your next code will be available[^\n.]{0,80}/i) ||
+                                bodyText.match(/next code[^\n.]{0,80}available[^\n.]{0,60}/i) ||
+                                bodyText.match(/available[^\n.]{0,60}(at|on)[^\n.]{0,40}/i);
+          if (sentenceMatch) {
+            // Strip leading fluff, keep the useful part
+            cooldown = sentenceMatch[0].replace(/^your next code will be available/i, 'Next code').trim();
+          }
         }
         return { code, cooldown };
       });
