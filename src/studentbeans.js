@@ -44,63 +44,42 @@ async function login() {
   return { success: false, message: 'No SB_COOKIES set.' };
 }
 
+// Convert query to slug: "ASOS" -> "asos", "JD Sports" -> "jd-sports"
+function toSlug(query) {
+  return query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
 async function searchRetailers(query) {
+  // Build direct URL from query slug — Student Beans URLs are always /student-discount/uk/<brand-slug>
+  const slug = toSlug(query);
+  const directUrl = `https://www.studentbeans.com/student-discount/uk/${slug}`;
+  
+  // Also try a few common variations
+  const variations = [
+    { name: query, url: directUrl },
+  ];
+
+  // Verify the direct URL actually exists by checking it
   const { context } = await getBrowser();
   const page = await context.newPage();
   try {
-    // Use the search API directly instead of scraping the page
-    const apiUrl = `https://www.studentbeans.com/api/v1/offers/search?q=${encodeURIComponent(query)}&country=gb&limit=8`;
-    console.log('[SB] Fetching search API:', apiUrl);
-    
-    const response = await page.goto(apiUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    const text = await page.evaluate(() => document.body.innerText);
-    console.log('[SB] API response:', text.substring(0, 500));
-    
-    let results = [];
-    try {
-      const data = JSON.parse(text);
-      // Handle various API response shapes
-      const items = data.results || data.offers || data.brands || data.data || data || [];
-      if (Array.isArray(items)) {
-        results = items.slice(0, 8).map(item => ({
-          name: item.brand_name || item.name || item.title || item.slug || 'Unknown',
-          url: `https://www.studentbeans.com/student-discount/uk/${item.slug || item.brand_slug || item.id}`
-        })).filter(r => r.name !== 'Unknown');
-      }
-    } catch (_) {
-      console.log('[SB] API parse failed, falling back to page scrape');
-    }
-    
-    // If API didn't work, fall back to scraping with longer wait
-    if (results.length === 0) {
-      console.log('[SB] Trying page scrape fallback...');
-      await page.goto(`https://www.studentbeans.com/student-discount/uk?q=${encodeURIComponent(query)}`, { waitUntil: 'networkidle', timeout: 30000 });
-      await page.waitForTimeout(3000);
-      
-      // Log what links exist
-      const allLinks = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('a[href]'))
-          .map(a => a.getAttribute('href'))
-          .filter(h => h && h.includes('/student-discount/uk/') && !h.includes('/uk/brands') && !h.includes('/uk/cats') && !h.includes('/uk/all') && h !== '/student-discount/uk/')
-          .slice(0, 20);
-      });
-      console.log('[SB] All matching links:', JSON.stringify(allLinks));
-      
-      results = allLinks
-        .filter((href, i, arr) => arr.indexOf(href) === i)
-        .slice(0, 8)
-        .map(href => ({
-          name: href.split('/').pop().replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-          url: `https://www.studentbeans.com${href}`
-        }));
-    }
-    
-    console.log('[SB] Search results:', JSON.stringify(results));
+    console.log('[SB] Checking URL:', directUrl);
+    const response = await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(2000);
+    const finalUrl = page.url();
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 300));
+    console.log('[SB] Direct URL check - final:', finalUrl, 'text:', bodyText.substring(0, 100));
     await page.close();
-    return results;
+
+    // If it redirected to 404 or home, brand doesn't exist
+    if (finalUrl.includes('/404') || finalUrl === 'https://www.studentbeans.com/' || finalUrl.includes('/student-discount/uk/') === false) {
+      return [];
+    }
+    return variations;
   } catch (err) {
     await page.close();
-    throw new Error(`Search failed: ${err.message}`);
+    // Return the URL anyway and let getCode handle errors
+    return variations;
   }
 }
 
@@ -115,13 +94,12 @@ async function getCode(retailerUrl) {
     await page.waitForTimeout(3000);
     console.log('[SB] At URL:', page.url());
 
-    // Log page text before clicking anything
-    const beforeText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-    console.log('[SB] Before click text:', beforeText);
+    const beforeText = await page.evaluate(() => document.body.innerText.substring(0, 600));
+    console.log('[SB] Page text before click:', beforeText);
 
-    // Listen for new popup/tab
+    // Listen for new popup/tab opened by button click
     const [newPage] = await Promise.all([
-      context.waitForEvent('page', { timeout: 5000 }).catch(() => null),
+      context.waitForEvent('page', { timeout: 6000 }).catch(() => null),
       (async () => {
         for (const sel of [
           'button:has-text("Get Discount")',
@@ -184,6 +162,7 @@ async function getCode(retailerUrl) {
         'EXTENSION','ALERTS','SITES','VISIT','SAVINGS','ADD','NOW','ALL','HERE',
         'LIST','JUST','BEING','NOSY','LOOKING','SPECIFIC','BRAND','MAYBE','FIND','CAN',
         'ADEXE','UNIQUE','SHARE','IMPORTANT','ONLY','ONCE','USED','COPY','COPIED',
+        'FRIDAY','BLACK','CYBER','MONDAY','SALE','FLASH','SPECIAL','EXCLUSIVE',
       ]);
       const match = document.body.innerText.match(/\b([A-Z][A-Z0-9]{4,19})\b/g);
       if (match) return match.find(m => !skip.has(m)) || null;
