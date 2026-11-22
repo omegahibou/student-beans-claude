@@ -1,13 +1,19 @@
-const { chromium } = require('playwright-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-
-chromium.use(StealthPlugin());
-
-const SB_BASE = 'https://www.studentbeans.com';
+const { chromium } = require('playwright');
 
 let browserInstance = null;
 let contextInstance = null;
 let isLoggedIn = false;
+
+function parseCookieString(cookieStr) {
+  return cookieStr.split(';').map(pair => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return null;
+    const name = pair.substring(0, idx).trim();
+    const value = pair.substring(idx + 1).trim();
+    if (!name) return null;
+    return { name, value, domain: '.studentbeans.com', path: '/' };
+  }).filter(Boolean);
+}
 
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
@@ -19,57 +25,23 @@ async function getBrowser() {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
     });
-    await contextInstance.addCookies([{
-      name: 'CookieConsent',
-      value: '{stamp:%27-1%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true}',
-      domain: '.studentbeans.com',
-      path: '/',
-    }]);
-    isLoggedIn = false;
+    if (process.env.SB_COOKIES) {
+      const cookies = parseCookieString(process.env.SB_COOKIES);
+      await contextInstance.addCookies(cookies);
+      console.log('[SB] Injected', cookies.length, 'cookies from env');
+    }
+    isLoggedIn = !!process.env.SB_COOKIES;
   }
   return { browser: browserInstance, context: contextInstance };
 }
 
 async function login() {
-  const { context } = await getBrowser();
-  if (isLoggedIn) return { success: true, message: 'Already logged in' };
-  const page = await context.newPage();
-  try {
-    console.log('[SB] Navigating to login page...');
-    await page.goto('https://www.studentbeans.com/login', { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForFunction(() => document.body && document.body.children.length > 0, { timeout: 15000 });
-    await page.waitForTimeout(4000);
-
-    for (const sel of ['button:has-text("Accept all")', 'button:has-text("Accept")', '#onetrust-accept-btn-handler']) {
-      try { await page.click(sel, { timeout: 2000 }); await page.waitForTimeout(1000); break; } catch (_) {}
-    }
-
-    const inputs = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('input')).map(i => ({
-        type: i.type, name: i.name, id: i.id, placeholder: i.placeholder
-      }))
-    );
-    console.log('[SB] Inputs found:', JSON.stringify(inputs));
-
-    const emailInput = await page.waitForSelector(
-      'input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="email" i], input[autocomplete*="email"]',
-      { timeout: 20000 }
-    );
-
-    await emailInput.fill(process.env.SB_EMAIL);
-    const pwInput = await page.waitForSelector('input[type="password"]', { timeout: 5000 });
-    await pwInput.fill(process.env.SB_PASSWORD);
-    await page.click('button[type="submit"]');
-    await page.waitForURL((url) => !url.includes('/login'), { timeout: 15000 });
+  if (process.env.SB_COOKIES) {
+    await getBrowser();
     isLoggedIn = true;
-    await page.close();
-    return { success: true, message: 'Logged in successfully' };
-  } catch (err) {
-    console.log('[SB] Login error:', err.message.substring(0, 300));
-    await page.close();
-    isLoggedIn = false;
-    return { success: false, message: `Login failed: ${err.message.substring(0, 300)}` };
+    return { success: true, message: 'Session loaded from cookies' };
   }
+  return { success: false, message: 'No SB_COOKIES set. Add your browser cookies as the SB_COOKIES env var in Railway.' };
 }
 
 async function searchRetailers(query) {
@@ -108,6 +80,8 @@ async function getCode(retailerUrl) {
   const page = await context.newPage();
   try {
     await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForFunction(() => document.body && document.body.children.length > 0, { timeout: 15000 });
+    await page.waitForTimeout(2000);
     for (const sel of ['button:has-text("Get Discount")', 'button:has-text("Reveal Code")', 'button:has-text("Get Code")', 'button:has-text("Reveal")', '[data-testid*="reveal"]', 'button[class*="reveal"]', 'button[class*="discount"]']) {
       try { await page.click(sel, { timeout: 4000 }); break; } catch (_) {}
     }
