@@ -274,54 +274,64 @@ async function getCode(retailerUrl) {
     const newPage = await newPagePromise;
 
     let code = null;
+    let cooldown = null;
 
     if (newPage) {
       console.log('[SB] New tab opened:', newPage.url());
       await newPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
       await newPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
-      code = await newPage.evaluate(() => {
+      const result = await newPage.evaluate(() => {
         // Primary target: the dashed-border animated button containing the code
-        // e.g. <button class="...animate-offerPop...border-dashed..."><p>STB27YQ80KP8O</p></button>
         const offerBtn = document.querySelector('button[class*="animate-offerPop"] p') ||
                          document.querySelector('button[class*="border-dashed"] p') ||
                          document.querySelector('button[class*="offerPop"]');
+        let code = null;
         if (offerBtn) {
           const val = offerBtn.textContent.trim();
-          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) code = val;
         }
-
-        // Fallback selectors
-        const fallbackSelectors = [
-          '[data-testid*="code"]',
-          '[class*="coupon-code"]',
-          '[class*="promo-code"]',
-          '[class*="discount-code"]',
-          '[class*="voucher-code"]',
-          'input[readonly]',
-          '[data-code]',
-          '[class*="code-box"]',
-          '[class*="codebox"]',
-        ];
-        for (const sel of fallbackSelectors) {
-          const el = document.querySelector(sel);
-          if (el) {
-            const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
-            if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+        if (!code) {
+          const fallbackSelectors = [
+            '[data-testid*="code"]',
+            '[class*="coupon-code"]',
+            '[class*="promo-code"]',
+            '[class*="discount-code"]',
+            '[class*="voucher-code"]',
+            'input[readonly]',
+            '[data-code]',
+            '[class*="code-box"]',
+            '[class*="codebox"]',
+          ];
+          for (const sel of fallbackSelectors) {
+            const el = document.querySelector(sel);
+            if (el) {
+              const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
+              if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) { code = val; break; }
+            }
           }
         }
-
-        // Last resort: scan body text for an uppercase code pattern
-        if (!document.body) return null;
-        const match = document.body.innerText.match(/\b([A-Z0-9]{6,20})\b/g);
-        if (match) {
-          const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
-          return match.find((m) => !skip.has(m)) || null;
+        if (!code && document.body) {
+          const match = document.body.innerText.match(/([A-Z0-9]{6,20})/g);
+          if (match) {
+            const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
+            code = match.find((m) => !skip.has(m)) || null;
+          }
         }
-        return null;
+        // Grab cooldown: "Your next code will be available at X:XXpm"
+        let cooldown = null;
+        if (document.body) {
+          const bodyText = document.body.innerText;
+          const cdMatch = bodyText.match(/next code will be available at ([\d:]+\s*[apm]{2})/i) ||
+                          bodyText.match(/available at ([\d:]+\s*[apm]{2})/i);
+          if (cdMatch) cooldown = cdMatch[1].trim();
+        }
+        return { code, cooldown };
       });
 
-      console.log('[SB] Code from new tab:', code);
+      code = result.code;
+      cooldown = result.cooldown;
+      console.log('[SB] Code from new tab:', code, 'cooldown:', cooldown);
       await newPage.close().catch(() => {});
     } else {
       // No new tab — try reading the code from the current page
@@ -352,7 +362,7 @@ async function getCode(retailerUrl) {
     await page.close().catch(() => {});
 
     if (code) {
-      return { code, type: 'code', url: retailerUrl };
+      return { code, type: 'code', url: retailerUrl, cooldown };
     } else if (wasRedirected) {
       return { code: null, type: 'redirect', url: finalUrl };
     } else {

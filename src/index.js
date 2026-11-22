@@ -613,13 +613,15 @@ async function showCodeForDeal(interaction, retailer, brandSlug, dealUrl, accoun
 
   if (result.type === 'code' && result.code) {
     addRecent(interaction.user.id, { name: retailer.name, url: retailer.url, code: result.code, type: 'code', timestamp: Date.now() });
+    const fields = [
+      { name: '🏷️ Your Code', value: `\`\`\`${result.code}\`\`\`` },
+      { name: '⚠️ Important', value: 'This code is **unique to your account**. Do not share it.' },
+    ];
+    if (result.cooldown) fields.push({ name: '⏰ Next code available', value: result.cooldown, inline: true });
     const embed = new EmbedBuilder()
       .setTitle(`🎉 ${retailer.name} Student Discount`)
       .setDescription("Here's your unique one-time-use code:")
-      .addFields(
-        { name: '🏷️ Your Code', value: `\`\`\`${result.code}\`\`\`` },
-        { name: '⚠️ Important', value: 'This code is **unique to your account**. Do not share it.' }
-      )
+      .addFields(...fields)
       .setColor(0x00c853).setFooter({ text: `Student Beans • ${account?.name || 'Default'} account` }).setTimestamp();
     const btns = [new ButtonBuilder().setLabel('Shop Now').setStyle(ButtonStyle.Link).setURL(result.url || retailer.url), favBtn];
     if (saveBtn) btns.push(saveBtn);
