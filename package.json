@@ -1,0 +1,19 @@
+{
+  "name": "studentbeans-bot",
+  "version": "1.0.0",
+  "description": "Discord bot to fetch Student Beans discount codes",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "install-browser": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "playwright": "^1.49.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
