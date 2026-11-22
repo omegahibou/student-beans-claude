@@ -660,5 +660,14 @@ function timeAgo(ts) {
 }
 
 process.on('SIGINT', async () => { await sb.closeBrowser(); client.destroy(); process.exit(0); });
+
+// Prevent stale/expired interactions (code 10062) from crashing the process
+process.on('unhandledRejection', (err) => {
+  if (err && err.code === 10062) {
+    console.warn('[Discord] Interaction expired (10062) - ignoring');
+    return;
+  }
+  console.error('[Unhandled Rejection]', err);
+});
 if (!process.env.DISCORD_TOKEN) { console.error('❌ DISCORD_TOKEN not set'); process.exit(1); }
 client.login(process.env.DISCORD_TOKEN);
