@@ -12,6 +12,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const sb = require('./studentbeans');
@@ -28,6 +29,16 @@ const recent = new Map();
 // Track which account index each user is currently using
 // Falls back to account 1 (or whichever is first) if not set
 const userAccount = new Map();
+// Preferred deal URL per user per brand slug, e.g. preferredDeal.get(userId)?.get('voxi')
+const preferredDeal = new Map();
+
+function getPreferredDeal(userId, brandSlug) {
+  return preferredDeal.get(userId)?.get(brandSlug) ?? null;
+}
+function setPreferredDeal(userId, brandSlug, dealUrl) {
+  if (!preferredDeal.has(userId)) preferredDeal.set(userId, new Map());
+  preferredDeal.get(userId).set(brandSlug, dealUrl);
+}
 
 function getFavs(userId) {
   if (!favourites.has(userId)) favourites.set(userId, new Set());
@@ -451,6 +462,42 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Deal picker — user chose a deal from the select menu
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('sb_deal_pick_')) {
+    await interaction.deferUpdate();
+    const brandSlug = interaction.customId.replace('sb_deal_pick_', '');
+    const value = interaction.values[0];
+    const dealIndex = parseInt(value.split('__').pop(), 10);
+
+    const pending = pendingDeals.get(`${interaction.user.id}_${brandSlug}`);
+    if (!pending) {
+      await interaction.editReply({ embeds: [errEmbed('Session expired', 'Please search again.')], components: [] });
+      return;
+    }
+
+    const deal = pending.deals[dealIndex];
+    if (!deal) {
+      await interaction.editReply({ embeds: [errEmbed('Invalid deal', 'Please search again.')], components: [] });
+      return;
+    }
+
+    pendingDeals.delete(`${interaction.user.id}_${brandSlug}`);
+    const account = getActiveAccount(interaction.user.id);
+    await showCodeForDeal(interaction, pending.retailer, brandSlug, deal.url, account, true);
+    return;
+  }
+
+  // Save preferred deal button
+  if (interaction.isButton() && interaction.customId.startsWith('sb_save_deal_')) {
+    const rest = interaction.customId.replace('sb_save_deal_', '');
+    const sep = rest.indexOf('__');
+    const brandSlug = rest.slice(0, sep);
+    const dealUrl = decodeURIComponent(rest.slice(sep + 2));
+    setPreferredDeal(interaction.user.id, brandSlug, dealUrl);
+    await interaction.reply({ content: `📌 Got it — I'll always use this deal for **${brandSlug}** next time.`, flags: 64 });
+    return;
+  }
+
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -467,16 +514,14 @@ function buildBrandButtons(slugs, prefix) {
   return rows;
 }
 
-async function fetchAndShowCode(interaction, query) {
+async function fetchAndShowCode(interaction, query, forceDealUrl = null) {
   await interaction.editReply({
     embeds: [new EmbedBuilder().setTitle(`⏳ Fetching **${query}**...`).setDescription('~10 seconds.').setColor(0xffa500)],
     components: [],
   });
 
-  // Wait for browser to be warm before proceeding
   if (browserReady) await browserReady;
 
-  // Pick cookies: use account system if available, fall back to legacy SB_COOKIES
   const account = getActiveAccount(interaction.user.id);
   const cookiesToUse = account ? account.cookies : process.env.SB_COOKIES;
   if (!cookiesToUse) {
@@ -484,7 +529,6 @@ async function fetchAndShowCode(interaction, query) {
     return;
   }
 
-  // Inject cookies into the warm browser — no browser restart needed
   await sb.setCookies(cookiesToUse);
 
   let retailers;
@@ -503,54 +547,99 @@ async function fetchAndShowCode(interaction, query) {
   }
 
   const retailer = retailers[0];
-  const slug = retailer.url.split('/').pop();
+  const brandSlug = retailer.url.split('/').pop();
 
+  // 1. forceDealUrl = user just chose from the picker
+  // 2. saved preference for this brand
+  // 3. scrape deals — if >1 show picker, else go straight in
+  let dealUrl = forceDealUrl || getPreferredDeal(interaction.user.id, brandSlug);
+
+  if (!dealUrl) {
+    let deals;
+    try { deals = await sb.getDeals(retailer.url); }
+    catch (err) { deals = [{ label: 'Default Deal', url: retailer.url, dealIndex: 0, brandUrl: retailer.url }]; }
+
+    if (deals.length > 1) {
+      const options = deals.slice(0, 25).map((d, i) => ({
+        label: d.label.length > 100 ? d.label.slice(0, 97) + '...' : d.label,
+        value: `${brandSlug}__${i}`,
+        description: `Deal ${i + 1} of ${deals.length}`,
+      }));
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(`sb_deal_pick_${brandSlug}`)
+        .setPlaceholder('Choose a deal...')
+        .addOptions(options);
+
+      pendingDeals.set(`${interaction.user.id}_${brandSlug}`, { deals, retailer, query });
+
+      await interaction.editReply({
+        embeds: [new EmbedBuilder()
+          .setTitle(`🎓 ${retailer.name} — Multiple Deals Available`)
+          .setDescription(`There are **${deals.length} deals** for ${retailer.name}. Pick one:`)
+          .setColor(0x5865f2)],
+        components: [new ActionRowBuilder().addComponents(select)],
+      });
+      return;
+    }
+
+    dealUrl = deals[0]?.url || retailer.url;
+  }
+
+  await showCodeForDeal(interaction, retailer, brandSlug, dealUrl, account, forceDealUrl != null);
+}
+
+// Pending multi-deal selections: key = `${userId}_${brandSlug}`
+const pendingDeals = new Map();
+
+async function showCodeForDeal(interaction, retailer, brandSlug, dealUrl, account, wasPicked = false) {
   let result;
-  try { result = await sb.getCode(retailer.url); }
+  try { result = await sb.getCode(dealUrl); }
   catch (err) {
     await interaction.editReply({ embeds: [errEmbed('Failed to get code', err.message)], components: [] });
     return;
   }
 
-  const isFav = getFavs(interaction.user.id).has(slug);
+  const isFav = getFavs(interaction.user.id).has(brandSlug);
   const favBtn = new ButtonBuilder()
-    .setCustomId(isFav ? `sb_fav_remove_${slug}` : `sb_fav_add_${slug}`)
+    .setCustomId(isFav ? `sb_fav_remove_${brandSlug}` : `sb_fav_add_${brandSlug}`)
     .setLabel(isFav ? '★ Remove Favourite' : '☆ Save to Favourites')
     .setStyle(isFav ? ButtonStyle.Danger : ButtonStyle.Secondary);
+
+  const saveBtn = wasPicked ? new ButtonBuilder()
+    .setCustomId(`sb_save_deal_${brandSlug}__${encodeURIComponent(dealUrl)}`)
+    .setLabel('📌 Save this deal for next time')
+    .setStyle(ButtonStyle.Primary) : null;
 
   if (result.type === 'code' && result.code) {
     addRecent(interaction.user.id, { name: retailer.name, url: retailer.url, code: result.code, type: 'code', timestamp: Date.now() });
     const embed = new EmbedBuilder()
       .setTitle(`🎉 ${retailer.name} Student Discount`)
-      .setDescription('Here\'s your unique one-time-use code:')
+      .setDescription("Here's your unique one-time-use code:")
       .addFields(
         { name: '🏷️ Your Code', value: `\`\`\`${result.code}\`\`\`` },
         { name: '⚠️ Important', value: 'This code is **unique to your account**. Do not share it.' }
       )
       .setColor(0x00c853).setFooter({ text: `Student Beans • ${account?.name || 'Default'} account` }).setTimestamp();
-    await interaction.editReply({
-      embeds: [embed],
-      components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('Shop Now').setStyle(ButtonStyle.Link).setURL(retailer.url), favBtn
-      )],
-    });
+    const btns = [new ButtonBuilder().setLabel('Shop Now').setStyle(ButtonStyle.Link).setURL(result.url || retailer.url), favBtn];
+    if (saveBtn) btns.push(saveBtn);
+    await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)] });
   } else if (result.type === 'redirect' && result.url) {
     addRecent(interaction.user.id, { name: retailer.name, url: retailer.url, code: null, type: 'redirect', timestamp: Date.now() });
     const embed = new EmbedBuilder()
       .setTitle(`🔗 ${retailer.name} — No Code Needed`)
       .setDescription('This retailer uses a **direct access link**. The discount is applied automatically.')
       .setColor(0x00bfff).setFooter({ text: `Student Beans • ${account?.name || 'Default'} account` }).setTimestamp();
-    await interaction.editReply({
-      embeds: [embed],
-      components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('Access Student Discount').setStyle(ButtonStyle.Link).setURL(result.url), favBtn
-      )],
-    });
+    const btns = [new ButtonBuilder().setLabel('Access Student Discount').setStyle(ButtonStyle.Link).setURL(result.url), favBtn];
+    if (saveBtn) btns.push(saveBtn);
+    await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)] });
   } else {
     await interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle(`⚠️ Couldn't extract code for ${retailer.name}`)
-        .setDescription(`Page loaded but no code found.\n\n[Get it manually here](${retailer.url})`)
+        .setDescription(`Page loaded but no code found.
+
+[Get it manually here](${retailer.url})`)
         .setColor(0xff9800)],
       components: [new ActionRowBuilder().addComponents(favBtn)],
     });

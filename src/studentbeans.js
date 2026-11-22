@@ -222,54 +222,108 @@ async function searchRetailers(query) {
   }
 }
 
+// Scrape all individual deal cards from a brand page.
+// Returns array of { label, url } where url has ?deal=N appended so getCode knows which to click.
+async function getDeals(brandUrl) {
+  console.log('[SB] getDeals:', brandUrl);
+  const { context } = await getBrowser();
+  const page = await context.newPage();
+  try {
+    await page.goto(brandUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const deals = await page.evaluate((base) => {
+      // Each deal card has a "Get code & open site" button — find the offer titles above them
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const dealBtns = buttons.filter(b =>
+        b.textContent.toLowerCase().includes('get code') ||
+        b.textContent.toLowerCase().includes('get discount') ||
+        b.textContent.toLowerCase().includes('reveal')
+      );
+
+      return dealBtns.map((btn, i) => {
+        // Walk up to find the nearest heading/title for this deal
+        let el = btn.parentElement;
+        let label = null;
+        for (let depth = 0; depth < 8 && el; depth++) {
+          const heading = el.querySelector('h2, h3, h4, [class*="title"], [class*="heading"], p strong');
+          if (heading) { label = heading.textContent.trim(); break; }
+          el = el.parentElement;
+        }
+        return { label: label || `Deal ${i + 1}`, index: i };
+      });
+    }, brandUrl);
+
+    await page.close();
+    console.log('[SB] getDeals found:', deals.length);
+    // Attach the brand URL + deal index so getCode knows which button to click
+    return deals.map(d => ({
+      label: d.label,
+      url: `${brandUrl}?__deal=${d.index}`,
+      dealIndex: d.index,
+      brandUrl,
+    }));
+  } catch (err) {
+    console.error('[SB] getDeals error:', err.message);
+    await page.close().catch(() => {});
+    return [{ label: 'Default Deal', url: brandUrl, dealIndex: 0, brandUrl }];
+  }
+}
+
 async function getCode(retailerUrl) {
   console.log('[SB] getCode:', retailerUrl);
   const loginResult = await login();
   if (!loginResult.success) throw new Error(loginResult.message);
 
+  // Parse out the deal index if present (added by getDeals)
+  const dealUrl = new URL(retailerUrl);
+  const dealIndex = dealUrl.searchParams.has('__deal')
+    ? parseInt(dealUrl.searchParams.get('__deal'), 10)
+    : 0;
+  dealUrl.searchParams.delete('__deal');
+  const cleanUrl = dealUrl.toString();
+
   const { context } = await getBrowser();
   const page = await context.newPage();
 
   try {
-    await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     // Student Beans opens a NEW TAB when "Get code & open site" is clicked.
     // Set up a listener BEFORE clicking so we don't miss it.
     const newPagePromise = context.waitForEvent('page', { timeout: 15000 }).catch(() => null);
 
-    const buttonSelectors = [
-      'button:has-text("Get code & open site")',
-      'button:has-text("Get Code")',
-      'button:has-text("Get Discount")',
-      'button:has-text("Reveal Code")',
-      'button:has-text("Reveal")',
-      '[data-testid*="reveal"]',
-      '[data-testid*="get-discount"]',
-      'button[class*="reveal"]',
-      'button[class*="discount"]',
-    ];
-
+    // Click the Nth deal button (dealIndex), or fall back to first match
     let clicked = false;
-    for (const sel of buttonSelectors) {
-      try {
-        await page.click(sel, { timeout: 4000 });
-        clicked = true;
-        console.log('[SB] Clicked:', sel);
-        break;
-      } catch (_) {}
+    const clicked_via_index = await page.evaluate((idx) => {
+      const btns = Array.from(document.querySelectorAll('button')).filter(b =>
+        b.textContent.toLowerCase().includes('get code') ||
+        b.textContent.toLowerCase().includes('get discount') ||
+        b.textContent.toLowerCase().includes('reveal')
+      );
+      if (btns[idx]) { btns[idx].click(); return true; }
+      if (btns[0]) { btns[0].click(); return true; }
+      return false;
+    }, dealIndex);
+    if (clicked_via_index) {
+      clicked = true;
+      console.log('[SB] Clicked deal button index:', dealIndex);
     }
 
     if (!clicked) {
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const target = btns.find(
-          (b) =>
-            b.textContent.toLowerCase().includes('get code') ||
-            b.textContent.toLowerCase().includes('discount') ||
-            b.textContent.toLowerCase().includes('reveal')
-        );
-        if (target) target.click();
-      });
+      const buttonSelectors = [
+        'button:has-text("Get code & open site")',
+        'button:has-text("Get Code")',
+        'button:has-text("Get Discount")',
+        'button:has-text("Reveal Code")',
+        'button:has-text("Reveal")',
+      ];
+      for (const sel of buttonSelectors) {
+        try {
+          await page.click(sel, { timeout: 3000 });
+          clicked = true;
+          console.log('[SB] Clicked:', sel);
+          break;
+        } catch (_) {}
+      }
     }
 
     // Wait for the new tab that Student Beans opens with the actual code
@@ -354,11 +408,11 @@ async function getCode(retailerUrl) {
     await page.close().catch(() => {});
 
     if (code) {
-      return { code, type: 'code', url: retailerUrl };
+      return { code, type: 'code', url: cleanUrl };
     } else if (wasRedirected) {
       return { code: null, type: 'redirect', url: finalUrl };
     } else {
-      return { code: null, type: 'unknown', url: retailerUrl };
+      return { code: null, type: 'unknown', url: cleanUrl };
     }
   } catch (err) {
     console.error('[SB] getCode error:', err.message);
@@ -415,4 +469,4 @@ async function testCookies(cookieStr) {
   }
 }
 
-module.exports = { login, searchRetailers, getCode, closeBrowser, resetSession, setCookies, testCookies };
+module.exports = { login, searchRetailers, getDeals, getCode, closeBrowser, resetSession, setCookies, testCookies };
