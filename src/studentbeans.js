@@ -433,7 +433,14 @@ async function getDeals(brandUrl) {
         return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
       });
 
-      return dealBtns.map((btn, i) => {
+      // dump card HTML of first button for debugging
+      const __debugHtml = dealBtns[0] ? (() => {
+        let el = dealBtns[0];
+        for (let d = 0; d < 8 && el.parentElement; d++) el = el.parentElement;
+        return el.outerHTML.slice(0, 4000);
+      })() : '';
+
+      return { __debugHtml, deals: dealBtns.map((btn, i) => {
         // Walk up to the smallest container that holds exactly one deal button
         let card = btn.parentElement;
         for (let depth = 0; depth < 10 && card; depth++) {
@@ -460,12 +467,14 @@ async function getDeals(brandUrl) {
           }
         }
         return { label: label || `Deal ${i + 1}`, index: i };
-      });
+      }) };
     });
 
     await page.close();
-    console.log('[SB] getDeals found:', deals.length, deals.map(d => d.label));
-    return deals.map(d => ({
+    console.log('[SB] getDeals DEBUG HTML:', deals.__debugHtml);
+    const dealList = deals.deals || deals;
+    console.log('[SB] getDeals found:', dealList.length, dealList.map(d => d.label));
+    return dealList.map(d => ({
       label: d.label,
       url: `${brandUrl}?__deal=${d.index}`,
       dealIndex: d.index,
