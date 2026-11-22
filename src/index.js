@@ -15,6 +15,9 @@ const {
 } = require('discord.js');
 
 const sb = require('./studentbeans');
+
+// Warmup promise — resolves when the browser is ready. Searches await this.
+let browserReady = null;
 const accts = require('./accounts');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -167,22 +170,23 @@ client.once('ready', async () => {
     console.log('⚡ Using legacy SB_COOKIES as default account');
   }
 
-  // Pre-warm the browser so the first search isn't slow
+  // Pre-warm the browser — store the promise so searches can await it
   console.log('🔥 Pre-warming browser...');
-  try {
-    const firstAccount = accounts[0];
-    const cookieStr = firstAccount ? firstAccount.cookies : process.env.SB_COOKIES;
-    if (cookieStr) {
-      await sb.setCookies(cookieStr);
-      console.log('🔥 Browser warm, cookies injected');
-    } else {
-      // No cookies yet — just launch the browser so it's ready
-      await sb.searchRetailers('__warmup__').catch(() => {});
-      console.log('🔥 Browser warm (no account cookies)');
+  const firstAccount = accounts[0];
+  const cookieStr = firstAccount ? firstAccount.cookies : process.env.SB_COOKIES;
+  browserReady = (async () => {
+    try {
+      if (cookieStr) {
+        await sb.setCookies(cookieStr);
+        console.log('🔥 Browser warm, cookies injected');
+      } else {
+        await sb.searchRetailers('__warmup__').catch(() => {});
+        console.log('🔥 Browser warm (no account cookies)');
+      }
+    } catch (e) {
+      console.log('🔥 Pre-warm failed (non-fatal):', e.message);
     }
-  } catch (e) {
-    console.log('🔥 Pre-warm failed (non-fatal):', e.message);
-  }
+  })();
 });
 
 // ── Interaction router ────────────────────────────────────────────────────────
@@ -464,6 +468,9 @@ async function fetchAndShowCode(interaction, query) {
     embeds: [new EmbedBuilder().setTitle(`⏳ Fetching **${query}**...`).setDescription('~10 seconds.').setColor(0xffa500)],
     components: [],
   });
+
+  // Wait for browser to be warm before proceeding
+  if (browserReady) await browserReady;
 
   // Pick cookies: use account system if available, fall back to legacy SB_COOKIES
   const account = getActiveAccount(interaction.user.id);
