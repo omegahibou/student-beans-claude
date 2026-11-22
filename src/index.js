@@ -166,6 +166,23 @@ client.once('ready', async () => {
   if (accounts.length === 0 && process.env.SB_COOKIES) {
     console.log('⚡ Using legacy SB_COOKIES as default account');
   }
+
+  // Pre-warm the browser so the first search isn't slow
+  console.log('🔥 Pre-warming browser...');
+  try {
+    const firstAccount = accounts[0];
+    const cookieStr = firstAccount ? firstAccount.cookies : process.env.SB_COOKIES;
+    if (cookieStr) {
+      await sb.setCookies(cookieStr);
+      console.log('🔥 Browser warm, cookies injected');
+    } else {
+      // No cookies yet — just launch the browser so it's ready
+      await sb.searchRetailers('__warmup__').catch(() => {});
+      console.log('🔥 Browser warm (no account cookies)');
+    }
+  } catch (e) {
+    console.log('🔥 Pre-warm failed (non-fatal):', e.message);
+  }
 });
 
 // ── Interaction router ────────────────────────────────────────────────────────
