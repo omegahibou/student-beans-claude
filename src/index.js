@@ -32,6 +32,59 @@ const userAccount = new Map();
 // Preferred deal URL per user per brand slug, e.g. preferredDeal.get(userId)?.get('voxi')
 const preferredDeal = new Map();
 
+// Cooldown tracker: brandSlug -> Map(accountIndex -> expiresAt ms)
+const cooldownTracker = new Map();
+
+function setCooldown(brandSlug, accountIndex, cooldownStr) {
+  if (!cooldownStr) return;
+  // Try to parse the cooldown string into a future timestamp
+  // Handles: "at 9:25pm", "at 4:35pm", "on 22 Dec at 8:33pm", "on 22 December"
+  const now = new Date();
+  let expiresAt = null;
+
+  // Try full datetime: "22 Dec at 8:33pm" or "22 December 2026 at 8:33pm"
+  const dateTimeMatch = cooldownStr.match(/(\d{1,2})\s+([A-Za-z]+)(?:\s+\d{4})?\s+at\s+(\d{1,2}:\d{2}\s*[apm]{2})/i);
+  if (dateTimeMatch) {
+    const [, day, month, time] = dateTimeMatch;
+    const parsed = new Date(`${day} ${month} ${now.getFullYear()} ${time}`);
+    if (!isNaN(parsed)) expiresAt = parsed.getTime();
+  }
+
+  // Try time only: "at 9:25pm" — assume same day, or next day if in past
+  if (!expiresAt) {
+    const timeMatch = cooldownStr.match(/(\d{1,2}:\d{2}\s*[apm]{2})/i);
+    if (timeMatch) {
+      const parsed = new Date(`${now.toDateString()} ${timeMatch[1]}`);
+      if (!isNaN(parsed)) {
+        // If it's already past, assume next day
+        expiresAt = parsed.getTime() < Date.now() ? parsed.getTime() + 86400000 : parsed.getTime();
+      }
+    }
+  }
+
+  // Fallback: 1 hour from now if we can't parse
+  if (!expiresAt) expiresAt = Date.now() + 3600000;
+
+  if (!cooldownTracker.has(brandSlug)) cooldownTracker.set(brandSlug, new Map());
+  cooldownTracker.get(brandSlug).set(accountIndex, expiresAt);
+  console.log(`[Cooldown] Set ${brandSlug} account #${accountIndex} -> expires ${new Date(expiresAt).toLocaleString()}`);
+}
+
+function isOnCooldown(brandSlug, accountIndex) {
+  const map = cooldownTracker.get(brandSlug);
+  if (!map) return false;
+  const exp = map.get(accountIndex);
+  if (!exp) return false;
+  return Date.now() < exp;
+}
+
+function getCooldownExpiry(brandSlug, accountIndex) {
+  const map = cooldownTracker.get(brandSlug);
+  if (!map) return null;
+  const exp = map.get(accountIndex);
+  return exp && Date.now() < exp ? exp : null;
+}
+
 function getPreferredDeal(userId, brandSlug) {
   return preferredDeal.get(userId)?.get(brandSlug) ?? null;
 }
@@ -482,7 +535,17 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     pendingDeals.delete(`${interaction.user.id}_${brandSlug}`);
-    const account = getActiveAccount(interaction.user.id);
+    // Cooldown-aware account rotation
+    const allAccts2 = accts.loadAccounts();
+    let account = getActiveAccount(interaction.user.id);
+    if (allAccts2.length > 1 && account && isOnCooldown(brandSlug, account.index)) {
+      const fresh = allAccts2.find(a => a.index !== account.index && !isOnCooldown(brandSlug, a.index));
+      if (fresh) {
+        console.log(`[Cooldown] Account #${account.index} on cooldown for ${brandSlug}, switching to #${fresh.index}`);
+        account = fresh;
+        await sb.setCookies(fresh.cookies);
+      }
+    }
     await showCodeForDeal(interaction, pending.retailer, brandSlug, deal.url, account, true);
     return;
   }
@@ -522,8 +585,11 @@ async function fetchAndShowCode(interaction, query, forceDealUrl = null) {
 
   if (browserReady) await browserReady;
 
-  const account = getActiveAccount(interaction.user.id);
-  const cookiesToUse = account ? account.cookies : process.env.SB_COOKIES;
+  const preferredAccount = getActiveAccount(interaction.user.id);
+
+  // Will be resolved after we know the brandSlug (once retailer is found)
+  // For now just load the preferred account for the search phase
+  const cookiesToUse = preferredAccount ? preferredAccount.cookies : process.env.SB_COOKIES;
   if (!cookiesToUse) {
     await interaction.editReply({ embeds: [errEmbed('No account set up', 'Go to **👤 Accounts** and add a Student Beans account first.')], components: [] });
     return;
@@ -586,6 +652,19 @@ async function fetchAndShowCode(interaction, query, forceDealUrl = null) {
     dealUrl = deals[0]?.url || retailer.url;
   }
 
+  // Cooldown-aware account rotation
+  const allAccounts = accts.loadAccounts();
+  let account = preferredAccount;
+
+  if (allAccounts.length > 1 && account && isOnCooldown(brandSlug, account.index)) {
+    const fresh = allAccounts.find(a => a.index !== account.index && !isOnCooldown(brandSlug, a.index));
+    if (fresh) {
+      console.log(`[Cooldown] Account #${account.index} on cooldown for ${brandSlug}, switching to #${fresh.index}`);
+      account = fresh;
+      await sb.setCookies(fresh.cookies);
+    }
+  }
+
   await showCodeForDeal(interaction, retailer, brandSlug, dealUrl, account, forceDealUrl != null);
 }
 
@@ -613,6 +692,7 @@ async function showCodeForDeal(interaction, retailer, brandSlug, dealUrl, accoun
 
   if (result.type === 'code' && result.code) {
     addRecent(interaction.user.id, { name: retailer.name, url: retailer.url, code: result.code, type: 'code', timestamp: Date.now() });
+    if (result.cooldown && account) setCooldown(brandSlug, account.index, result.cooldown);
     const fields = [
       { name: '🏷️ Your Code', value: `\`\`\`${result.code}\`\`\`` },
       { name: '⚠️ Important', value: 'This code is **unique to your account**. Do not share it.' },
