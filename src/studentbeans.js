@@ -5,14 +5,18 @@ let contextInstance = null;
 let isLoggedIn = false;
 
 function parseCookieString(cookieStr) {
-  return cookieStr.split(';').map(pair => {
+  const cookies = [];
+  cookieStr.split(';').forEach(pair => {
     const idx = pair.indexOf('=');
-    if (idx === -1) return null;
+    if (idx === -1) return;
     const name = pair.substring(0, idx).trim();
     const value = pair.substring(idx + 1).trim();
-    if (!name) return null;
-    return { name, value, domain: '.studentbeans.com', path: '/' };
-  }).filter(Boolean);
+    if (!name) return;
+    // Add cookie for both domain variants
+    cookies.push({ name, value, domain: '.studentbeans.com', path: '/' });
+    cookies.push({ name, value, domain: 'www.studentbeans.com', path: '/' });
+  });
+  return cookies;
 }
 
 async function getBrowser() {
@@ -28,7 +32,7 @@ async function getBrowser() {
     if (process.env.SB_COOKIES) {
       const cookies = parseCookieString(process.env.SB_COOKIES);
       await contextInstance.addCookies(cookies);
-      console.log('[SB] Injected', cookies.length, 'cookies from env');
+      console.log('[SB] Injected', cookies.length, 'cookie entries from env');
     }
     isLoggedIn = !!process.env.SB_COOKIES;
   }
@@ -44,42 +48,28 @@ async function login() {
   return { success: false, message: 'No SB_COOKIES set.' };
 }
 
-// Convert query to slug: "ASOS" -> "asos", "JD Sports" -> "jd-sports"
 function toSlug(query) {
   return query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 async function searchRetailers(query) {
-  // Build direct URL from query slug — Student Beans URLs are always /student-discount/uk/<brand-slug>
   const slug = toSlug(query);
   const directUrl = `https://www.studentbeans.com/student-discount/uk/${slug}`;
-  
-  // Also try a few common variations
-  const variations = [
-    { name: query, url: directUrl },
-  ];
-
-  // Verify the direct URL actually exists by checking it
   const { context } = await getBrowser();
   const page = await context.newPage();
   try {
     console.log('[SB] Checking URL:', directUrl);
-    const response = await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForTimeout(2000);
     const finalUrl = page.url();
-    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 300));
-    console.log('[SB] Direct URL check - final:', finalUrl, 'text:', bodyText.substring(0, 100));
     await page.close();
-
-    // If it redirected to 404 or home, brand doesn't exist
-    if (finalUrl.includes('/404') || finalUrl === 'https://www.studentbeans.com/' || finalUrl.includes('/student-discount/uk/') === false) {
+    if (finalUrl.includes('/404') || finalUrl === 'https://www.studentbeans.com/') {
       return [];
     }
-    return variations;
+    return [{ name: query, url: directUrl }];
   } catch (err) {
     await page.close();
-    // Return the URL anyway and let getCode handle errors
-    return variations;
+    return [{ name: query, url: directUrl }];
   }
 }
 
@@ -90,21 +80,30 @@ async function getCode(retailerUrl) {
   const page = await context.newPage();
   console.log('[SB] getCode called with URL:', retailerUrl);
   try {
+    // Navigate to home first to establish session, then go to brand page
+    await page.goto('https://www.studentbeans.com/student-discount/uk', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(1500);
+    
+    // Check if logged in
+    const homeText = await page.evaluate(() => document.body.innerText.substring(0, 200));
+    console.log('[SB] Home page text:', homeText.replace(/\n/g, ' '));
+
+    // Now navigate to the brand page
     await page.goto(retailerUrl, { waitUntil: 'networkidle', timeout: 45000 });
     await page.waitForTimeout(3000);
     console.log('[SB] At URL:', page.url());
 
-    const beforeText = await page.evaluate(() => document.body.innerText.substring(0, 600));
+    const beforeText = await page.evaluate(() => document.body.innerText.substring(0, 800));
     console.log('[SB] Page text before click:', beforeText);
 
-    // Listen for new popup/tab opened by button click
+    // Listen for new popup/tab
     const [newPage] = await Promise.all([
       context.waitForEvent('page', { timeout: 6000 }).catch(() => null),
       (async () => {
         for (const sel of [
+          'button:has-text("Get Code")',
           'button:has-text("Get Discount")',
           'button:has-text("Reveal Code")',
-          'button:has-text("Get Code")',
           'button:has-text("Reveal")',
           '[data-testid*="reveal"]',
           'button[class*="reveal"]',
@@ -127,13 +126,14 @@ async function getCode(retailerUrl) {
       await newPage.waitForLoadState('domcontentloaded').catch(() => {});
       await newPage.waitForTimeout(2000);
     } else {
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(3000);
     }
 
-    const bodyText = await activePage.evaluate(() => document.body.innerText.substring(0, 800));
+    const bodyText = await activePage.evaluate(() => document.body.innerText.substring(0, 1000));
     console.log('[SB] Active page text:', bodyText);
     console.log('[SB] Active page URL:', activePage.url());
 
+    // Try to find the code
     const code = await activePage.evaluate(() => {
       for (const sel of [
         '[data-testid*="code"]',
@@ -141,11 +141,15 @@ async function getCode(retailerUrl) {
         '[class*="promo-code"]',
         '[class*="discount-code"]',
         '[class*="voucher-code"]',
+        '[class*="code-box"]',
+        '[class*="codebox"]',
         'input[readonly]',
         '[data-code]',
         'p[class*="code"]',
         'span[class*="code"]',
         'div[class*="code"]',
+        '[class*="reward"]',
+        '[class*="offer-code"]',
       ]) {
         const el = document.querySelector(sel);
         if (el) {
@@ -160,9 +164,10 @@ async function getCode(retailerUrl) {
         'WITH','FROM','THEY','BEEN','HAVE','WILL','MORE','ALSO','THAN','THEN','WHEN',
         'WHAT','ABOUT','ADDICT','BRANDS','BROWSE','NEVER','MISS','DEALS','CHROME',
         'EXTENSION','ALERTS','SITES','VISIT','SAVINGS','ADD','NOW','ALL','HERE',
-        'LIST','JUST','BEING','NOSY','LOOKING','SPECIFIC','BRAND','MAYBE','FIND','CAN',
+        'LIST','JUST','BEING','NOSY','LOOKING','SPECIFIC','BRAND','MAYBE','FIND',
         'ADEXE','UNIQUE','SHARE','IMPORTANT','ONLY','ONCE','USED','COPY','COPIED',
         'FRIDAY','BLACK','CYBER','MONDAY','SALE','FLASH','SPECIAL','EXCLUSIVE',
+        'VOXI','ASOS','NIKE','APPLE','GOOGLE','AMAZON',
       ]);
       const match = document.body.innerText.match(/\b([A-Z][A-Z0-9]{4,19})\b/g);
       if (match) return match.find(m => !skip.has(m)) || null;
