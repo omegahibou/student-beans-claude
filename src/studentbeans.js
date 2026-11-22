@@ -224,6 +224,16 @@ async function searchRetailers(query) {
 
 async function getCode(retailerUrl) {
   console.log('[SB] getCode:', retailerUrl);
+
+  // Parse and strip the __deal index from the URL before navigating
+  const urlObj = new URL(retailerUrl);
+  const dealIndex = urlObj.searchParams.has('__deal')
+    ? parseInt(urlObj.searchParams.get('__deal'), 10)
+    : 0;
+  urlObj.searchParams.delete('__deal');
+  const cleanUrl = urlObj.toString();
+  console.log('[SB] dealIndex:', dealIndex, 'cleanUrl:', cleanUrl);
+
   const loginResult = await login();
   if (!loginResult.success) throw new Error(loginResult.message);
 
@@ -231,46 +241,25 @@ async function getCode(retailerUrl) {
   const page = await context.newPage();
 
   try {
-    await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     // Student Beans opens a NEW TAB when "Get code & open site" is clicked.
     // Set up a listener BEFORE clicking so we don't miss it.
     const newPagePromise = context.waitForEvent('page', { timeout: 15000 }).catch(() => null);
 
-    const buttonSelectors = [
-      'button:has-text("Get code & open site")',
-      'button:has-text("Get Code")',
-      'button:has-text("Get Discount")',
-      'button:has-text("Reveal Code")',
-      'button:has-text("Reveal")',
-      '[data-testid*="reveal"]',
-      '[data-testid*="get-discount"]',
-      'button[class*="reveal"]',
-      'button[class*="discount"]',
-    ];
-
-    let clicked = false;
-    for (const sel of buttonSelectors) {
-      try {
-        await page.click(sel, { timeout: 4000 });
-        clicked = true;
-        console.log('[SB] Clicked:', sel);
-        break;
-      } catch (_) {}
-    }
-
-    if (!clicked) {
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const target = btns.find(
-          (b) =>
-            b.textContent.toLowerCase().includes('get code') ||
-            b.textContent.toLowerCase().includes('discount') ||
-            b.textContent.toLowerCase().includes('reveal')
-        );
-        if (target) target.click();
+    // Click the Nth deal button (dealIndex), not always the first one.
+    const clicked = await page.evaluate((idx) => {
+      const btns = Array.from(document.querySelectorAll('button')).filter((b) => {
+        const t = b.textContent.toLowerCase();
+        return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
       });
-    }
+      console.log('[SB-eval] deal buttons found:', btns.length, 'clicking index:', idx);
+      const target = btns[idx] || btns[0];
+      if (target) { target.click(); return true; }
+      return false;
+    }, dealIndex);
+
+    console.log('[SB] Click result:', clicked, '(dealIndex', dealIndex + ')');
 
     // Wait for the new tab that Student Beans opens with the actual code
     const newPage = await newPagePromise;
