@@ -151,43 +151,73 @@ async function login() {
   }
 }
 
+// Convert a user query into a URL slug: lowercase, spaces→hyphens, strip specials
+function toSlug(query) {
+  return query.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
 async function searchRetailers(query) {
+  if (query === '__warmup__') return [];
   console.log('[SB] searchRetailers:', query);
   const { context } = await getBrowser();
+
+  // Strategy 1: try the direct brand URL (e.g. /student-discount/uk/asos)
+  const slug = toSlug(query);
+  const directUrl = `${SB_BASE}/student-discount/uk/${slug}`;
+  console.log('[SB] Trying direct URL:', directUrl);
+
   const page = await context.newPage();
-
   try {
-    const searchUrl = `${SB_DISCOUNTS}?q=${encodeURIComponent(query)}`;
-    console.log('[SB] Navigating to:', searchUrl);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    console.log('[SB] Search page loaded');
+    const response = await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const finalUrl = page.url();
+    const status = response ? response.status() : 0;
 
-    await page.waitForSelector('a[href*="/student-discount/uk/"]', { timeout: 10000 }).catch(() => {});
+    // If the page loaded and didn't redirect to a 404/error page, use it
+    if (status < 400 && finalUrl.includes('/student-discount/uk/') && !finalUrl.includes('/uk/cats') && !finalUrl.includes('/uk?')) {
+      // Extract the brand name from the page title or h1
+      const name = await page.evaluate((fallback) => {
+        const h1 = document.querySelector('h1');
+        if (h1) {
+          // Strip common suffixes like "Student Discount | ..."
+          return h1.textContent.trim().replace(/\s*student discount.*/i, '').trim() || fallback;
+        }
+        return document.title.replace(/\s*student discount.*/i, '').replace(/\s*\|.*/, '').trim() || fallback;
+      }, query);
+      await page.close();
+      console.log('[SB] Direct URL hit:', name, directUrl);
+      return [{ name, url: directUrl }];
+    }
 
-    const results = await page.evaluate(() => {
-      const cards = document.querySelectorAll('a[href*="/student-discount/uk/"]');
+    // Strategy 2: direct URL failed — try the all-brands listing page and search there
+    console.log('[SB] Direct URL miss (status', status, '), trying brands listing');
+    await page.goto(`${SB_BASE}/student-discount/uk/brands`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    const results = await page.evaluate((q) => {
+      const links = Array.from(document.querySelectorAll('a[href*="/student-discount/uk/"]'));
+      const ql = q.toLowerCase();
       const seen = new Set();
       const items = [];
-      for (const card of cards) {
-        const href = card.getAttribute('href');
-        if (href && href.includes('/student-discount/uk/') && !seen.has(href)) {
-          seen.add(href);
-          const nameEl = card.querySelector('h2, h3, [class*="brand"], [class*="name"], [class*="title"]');
-          const name = nameEl ? nameEl.textContent.trim() : card.textContent.trim().split('\n')[0].trim();
-          if (name && name.length > 0 && name.length < 60) {
-            items.push({ name, url: `https://www.studentbeans.com${href}` });
-          }
+      for (const a of links) {
+        const href = a.getAttribute('href') || '';
+        // Skip category/collection pages
+        if (href.includes('/cats') || href.includes('/collections') || href.includes('/brands')) continue;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const text = a.textContent.trim().toLowerCase();
+        const slug = href.split('/').pop();
+        if (text.includes(ql) || slug.includes(ql)) {
+          items.push({ name: a.textContent.trim().split('\n')[0].trim(), url: `https://www.studentbeans.com${href}` });
         }
       }
-      return items.slice(0, 8);
-    });
+      return items.slice(0, 5);
+    }, query);
 
-    console.log('[SB] Search results count:', results.length);
     await page.close();
+    console.log('[SB] Brands listing results:', results.length);
     return results;
   } catch (err) {
     console.error('[SB] searchRetailers error:', err.message);
-    await page.close();
+    await page.close().catch(() => {});
     throw new Error(`Search failed: ${err.message}`);
   }
 }
