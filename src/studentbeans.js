@@ -1,6 +1,4 @@
 const { chromium } = require('playwright');
-const fs = require('fs');
-const path = require('path');
 
 const SB_BASE = 'https://www.studentbeans.com';
 
@@ -35,48 +33,33 @@ async function login() {
   const page = await context.newPage();
   try {
     console.log('[SB] Navigating to login page...');
-    await page.goto('https://www.studentbeans.com/login', { waitUntil: 'networkidle', timeout: 45000 });
-    console.log('[SB] Page URL after load:', page.url());
+    await page.goto('https://www.studentbeans.com/login', { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-    // Log full page HTML to see what we're dealing with
-    const html = await page.content();
-    console.log('[SB] Page HTML (first 2000 chars):', html.substring(0, 2000));
+    // Wait for React to hydrate - wait for ANY visible element in body
+    await page.waitForFunction(() => document.body && document.body.children.length > 0, { timeout: 15000 });
+    console.log('[SB] Body has content, waiting for form...');
 
-    // Check for iframes
-    const frames = page.frames();
-    console.log('[SB] Frames on page:', frames.map(f => f.url()));
+    // Wait extra time for React to fully render
+    await page.waitForTimeout(3000);
 
     // Try consent buttons
     for (const sel of ['button:has-text("Accept all")', 'button:has-text("Accept")', '#onetrust-accept-btn-handler']) {
-      try { await page.click(sel, { timeout: 2000 }); console.log('[SB] Clicked consent:', sel); break; } catch (_) {}
+      try { await page.click(sel, { timeout: 2000 }); console.log('[SB] Clicked consent:', sel); await page.waitForTimeout(1000); break; } catch (_) {}
     }
 
-    // Wait a bit after potential consent click
-    await page.waitForTimeout(2000);
+    // Log what inputs exist now
+    const inputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).map(i => ({
+        type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, className: i.className.substring(0, 50)
+      }))
+    );
+    console.log('[SB] Inputs after wait:', JSON.stringify(inputs));
 
-    // Log HTML again after consent
-    const html2 = await page.content();
-    console.log('[SB] HTML after consent (first 2000 chars):', html2.substring(0, 2000));
-
-    // Try to find email input across all frames
-    let emailInput = null;
-    for (const frame of page.frames()) {
-      try {
-        emailInput = await frame.waitForSelector('input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="email" i]', { timeout: 5000 });
-        if (emailInput) { console.log('[SB] Found email input in frame:', frame.url()); break; }
-      } catch (_) {}
-    }
-
-    if (!emailInput) {
-      // Last resort: dump all inputs
-      const inputs = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('input')).map(i => ({
-          type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, className: i.className
-        }));
-      });
-      console.log('[SB] All inputs found:', JSON.stringify(inputs));
-      throw new Error('Email input not found after full page inspection');
-    }
+    // Wait for email input with longer timeout
+    const emailInput = await page.waitForSelector(
+      'input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="email" i], input[autocomplete*="email"]',
+      { timeout: 20000 }
+    );
 
     await emailInput.fill(process.env.SB_EMAIL);
     const pwInput = await page.waitForSelector('input[type="password"]', { timeout: 5000 });
@@ -87,7 +70,9 @@ async function login() {
     await page.close();
     return { success: true, message: 'Logged in successfully' };
   } catch (err) {
-    console.log('[SB] Login error:', err.message);
+    const html = await page.content().catch(() => '');
+    console.log('[SB] HTML on failure (chars 2000-4000):', html.substring(2000, 4000));
+    console.log('[SB] Login error:', err.message.substring(0, 300));
     await page.close();
     isLoggedIn = false;
     return { success: false, message: `Login failed: ${err.message.substring(0, 300)}` };
