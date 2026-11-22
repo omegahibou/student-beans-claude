@@ -207,4 +207,3 @@ function resetSession() {
   }
 }
 
-module.exports = { login, searchRetailers, getCode, closeBrowser, resetSession };
