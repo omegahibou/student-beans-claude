@@ -71,7 +71,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply({ ephemeral: true });
     sb.resetSession();
     const result = await sb.login();
-    await interaction.editReply(result.success ? '✅ Logged in to Student Beans!' : `❌ ${result.message}`);
+    await interaction.editReply(result.success ? '✅ Logged in to Student Beans!' : `❌ ${result.message.substring(0, 1800)}`);
     return;
   }
 
@@ -84,7 +84,8 @@ client.on('interactionCreate', async (interaction) => {
     try {
       results = await sb.searchRetailers(query);
     } catch (err) {
-      await interaction.editReply(`❌ Search failed: ${err.message}`);
+      const shortErr = err.message.length > 500 ? err.message.substring(0, 500) + '...' : err.message;
+      await interaction.editReply(`❌ Search failed: ${shortErr}`);
       return;
     }
 
@@ -156,9 +157,10 @@ async function handleGetCode(interaction, retailerUrl, retailerName = null) {
   try {
     result = await sb.getCode(retailerUrl);
   } catch (err) {
+    const shortErr = err.message.length > 500 ? err.message.substring(0, 500) + '...' : err.message;
     const errEmbed = new EmbedBuilder()
       .setTitle('❌ Failed to get code')
-      .setDescription(`${err.message}\n\nTry \`/sb-login\` to refresh the session.`)
+      .setDescription(`${shortErr}\n\nTry \`/sb-login\` to refresh the session.`)
       .setColor(0xff0000);
     await interaction.editReply({ embeds: [errEmbed], components: [] });
     return;
