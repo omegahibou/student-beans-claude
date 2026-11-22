@@ -48,24 +48,53 @@ async function searchRetailers(query) {
   const { context } = await getBrowser();
   const page = await context.newPage();
   try {
-    await page.goto(`https://www.studentbeans.com/student-discount/uk?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForSelector('a[href*="/student-discount/uk/"]', { timeout: 10000 }).catch(() => {});
-    const results = await page.evaluate(() => {
-      const cards = document.querySelectorAll('a[href*="/student-discount/uk/"]');
-      const seen = new Set();
-      const items = [];
-      for (const card of cards) {
-        const href = card.getAttribute('href');
-        // Must be a brand page (e.g. /student-discount/uk/asos), not /brands or /uk itself
-        if (href && /\/student-discount\/uk\/[^/]+$/.test(href) && !href.endsWith('/uk/') && !seen.has(href)) {
-          seen.add(href);
-          const nameEl = card.querySelector('h2, h3, [class*="brand"], [class*="name"], [class*="title"]');
-          const name = nameEl ? nameEl.textContent.trim() : card.textContent.trim().split('\n')[0].trim();
-          if (name && name.length > 0 && name.length < 60) items.push({ name, url: `https://www.studentbeans.com${href}` });
-        }
+    // Use the search API directly instead of scraping the page
+    const apiUrl = `https://www.studentbeans.com/api/v1/offers/search?q=${encodeURIComponent(query)}&country=gb&limit=8`;
+    console.log('[SB] Fetching search API:', apiUrl);
+    
+    const response = await page.goto(apiUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const text = await page.evaluate(() => document.body.innerText);
+    console.log('[SB] API response:', text.substring(0, 500));
+    
+    let results = [];
+    try {
+      const data = JSON.parse(text);
+      // Handle various API response shapes
+      const items = data.results || data.offers || data.brands || data.data || data || [];
+      if (Array.isArray(items)) {
+        results = items.slice(0, 8).map(item => ({
+          name: item.brand_name || item.name || item.title || item.slug || 'Unknown',
+          url: `https://www.studentbeans.com/student-discount/uk/${item.slug || item.brand_slug || item.id}`
+        })).filter(r => r.name !== 'Unknown');
       }
-      return items.slice(0, 8);
-    });
+    } catch (_) {
+      console.log('[SB] API parse failed, falling back to page scrape');
+    }
+    
+    // If API didn't work, fall back to scraping with longer wait
+    if (results.length === 0) {
+      console.log('[SB] Trying page scrape fallback...');
+      await page.goto(`https://www.studentbeans.com/student-discount/uk?q=${encodeURIComponent(query)}`, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForTimeout(3000);
+      
+      // Log what links exist
+      const allLinks = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('a[href]'))
+          .map(a => a.getAttribute('href'))
+          .filter(h => h && h.includes('/student-discount/uk/') && !h.includes('/uk/brands') && !h.includes('/uk/cats') && !h.includes('/uk/all') && h !== '/student-discount/uk/')
+          .slice(0, 20);
+      });
+      console.log('[SB] All matching links:', JSON.stringify(allLinks));
+      
+      results = allLinks
+        .filter((href, i, arr) => arr.indexOf(href) === i)
+        .slice(0, 8)
+        .map(href => ({
+          name: href.split('/').pop().replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          url: `https://www.studentbeans.com${href}`
+        }));
+    }
+    
     console.log('[SB] Search results:', JSON.stringify(results));
     await page.close();
     return results;
@@ -78,17 +107,19 @@ async function searchRetailers(query) {
 async function getCode(retailerUrl) {
   const loginResult = await login();
   if (!loginResult.success) throw new Error(loginResult.message);
-  const { browser, context } = await getBrowser();
+  const { context } = await getBrowser();
   const page = await context.newPage();
   console.log('[SB] getCode called with URL:', retailerUrl);
   try {
-    await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForFunction(() => document.body && document.body.children.length > 2, { timeout: 15000 });
+    await page.goto(retailerUrl, { waitUntil: 'networkidle', timeout: 45000 });
     await page.waitForTimeout(3000);
-
     console.log('[SB] At URL:', page.url());
 
-    // Listen for new pages (popup/tab) opened by button click
+    // Log page text before clicking anything
+    const beforeText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+    console.log('[SB] Before click text:', beforeText);
+
+    // Listen for new popup/tab
     const [newPage] = await Promise.all([
       context.waitForEvent('page', { timeout: 5000 }).catch(() => null),
       (async () => {
@@ -112,7 +143,6 @@ async function getCode(retailerUrl) {
       })(),
     ]);
 
-    // If a new tab/popup opened, work there instead
     const activePage = newPage || page;
     if (newPage) {
       console.log('[SB] New page opened:', newPage.url());
@@ -127,7 +157,6 @@ async function getCode(retailerUrl) {
     console.log('[SB] Active page URL:', activePage.url());
 
     const code = await activePage.evaluate(() => {
-      // Try specific code elements first
       for (const sel of [
         '[data-testid*="code"]',
         '[class*="coupon-code"]',
@@ -146,15 +175,15 @@ async function getCode(retailerUrl) {
           if (val && val.length >= 3 && val.length <= 30 && !/\s/.test(val)) return val;
         }
       }
-      // Fallback: uppercase alphanumeric words that look like promo codes
       const skip = new Set([
         'STUDENT','BEANS','DISCOUNT','OFFER','SAVE','FREE','SHOP','GRANTED','ACCESS',
         'VERIFY','VALID','CLAIM','LOGIN','EMAIL','APPLY','TERMS','CODE','VIEW','OPEN',
         'BACK','NEXT','SKIP','NULL','TRUE','HTTP','HTML','HTTPS','YOUR','THIS','THAT',
         'WITH','FROM','THEY','BEEN','HAVE','WILL','MORE','ALSO','THAN','THEN','WHEN',
         'WHAT','ABOUT','ADDICT','BRANDS','BROWSE','NEVER','MISS','DEALS','CHROME',
-        'EXTENSION','ALERTS','SITES','VISIT','SAVINGS','ADD','NOW','FOR','ALL','HERE',
+        'EXTENSION','ALERTS','SITES','VISIT','SAVINGS','ADD','NOW','ALL','HERE',
         'LIST','JUST','BEING','NOSY','LOOKING','SPECIFIC','BRAND','MAYBE','FIND','CAN',
+        'ADEXE','UNIQUE','SHARE','IMPORTANT','ONLY','ONCE','USED','COPY','COPIED',
       ]);
       const match = document.body.innerText.match(/\b([A-Z][A-Z0-9]{4,19})\b/g);
       if (match) return match.find(m => !skip.has(m)) || null;
