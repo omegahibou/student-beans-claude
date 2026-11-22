@@ -229,4 +229,121 @@ function resetSession() {
   isLoggedIn = false;
 }
 
-module.exports = { login, searchRetailers, getCode, closeBrowser, resetSession };
+module.exports = { login, searchRetailers, getDeals, getCode, closeBrowser, resetSession, setCookies, testCookies };
+
+async function setCookies(cookieStr) {
+  if (!cookieStr) return;
+  const { context } = await getBrowser();
+  const cookies = parseCookieString(cookieStr);
+  if (cookies.length === 0) return;
+  // Clear existing studentbeans.com cookies and replace with the new set
+  const existing = await context.cookies('https://www.studentbeans.com');
+  if (existing.length > 0) {
+    await context.clearCookies();
+    // Re-apply just the consent cookie so the banner doesn't reappear
+    await context.addCookies([
+      {
+        name: 'CookieConsent',
+        value: '{stamp:%27-1%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true%2Cver:1%2Cutc:1700000000000%2Cregion:%27gb%27}',
+        domain: '.studentbeans.com',
+        path: '/',
+      },
+    ]);
+  }
+  await context.addCookies(cookies);
+  // Mark as logged in since we have session cookies — login() will skip its web flow
+  isLoggedIn = true;
+  console.log(`[SB] setCookies: injected ${cookies.length} cookies`);
+}
+
+async function testCookies(cookieStr) {
+  if (!cookieStr) return false;
+  // Inject the cookies into the shared context and try to load a protected page
+  const savedLoginState = isLoggedIn;
+  try {
+    await setCookies(cookieStr);
+    const { context } = await getBrowser();
+    const page = await context.newPage();
+    try {
+      await page.goto('https://www.studentbeans.com/student-discount/uk/asos', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(1500);
+      const text = await page.evaluate(() => document.body.innerText);
+      await page.close();
+      // If we see the verify wall, cookies are expired
+      if (text.includes('verify') && text.includes('student')) return false;
+      return true;
+    } catch (e) {
+      await page.close().catch(() => {});
+      return false;
+    }
+  } catch (e) {
+    return false;
+  } finally {
+    // Restore previous login state so the next real search isn't affected
+    isLoggedIn = savedLoginState;
+  }
+}
+
+// Returns array of { label, url } where url has ?__deal=N appended so getCode knows which to click.
+async function getDeals(brandUrl) {
+  console.log('[SB] getDeals:', brandUrl);
+  const { context } = await getBrowser();
+  const page = await context.newPage();
+  try {
+    // networkidle gives React time to render deal cards (domcontentloaded is too early)
+    await page.goto(brandUrl, { waitUntil: 'networkidle', timeout: 25000 });
+    const deals = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const dealBtns = buttons.filter(b => {
+        const t = b.textContent.toLowerCase();
+        return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
+      });
+
+      return dealBtns.map((btn, i) => {
+        // Find the card container: walk up until we find an element with only this one deal button
+        let card = btn.parentElement;
+        for (let depth = 0; depth < 10 && card; depth++) {
+          const btnsInCard = Array.from(card.querySelectorAll('button')).filter(b => {
+            const t = b.textContent.toLowerCase();
+            return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
+          });
+          if (btnsInCard.length === 1) break;
+          card = card.parentElement;
+        }
+        let label = null;
+        if (card) {
+          const heading = card.querySelector('h1, h2, h3, h4, h5');
+          if (heading) {
+            label = heading.textContent.trim();
+          } else {
+            const btnText = btn.textContent.trim().toLowerCase();
+            const textEls = Array.from(card.querySelectorAll('p, span, div'));
+            for (const el of textEls) {
+              const t = el.textContent.trim();
+              if (t && t.toLowerCase() !== btnText && t.length > 3 && t.length < 120) {
+                if (el.children.length === 0 || el.tagName === 'P') {
+                  label = t;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        return { label: label || `Deal ${i + 1}`, index: i };
+      });
+    });
+
+    await page.close();
+    console.log('[SB] getDeals found:', deals.length, deals.map(d => d.label));
+    return deals.map(d => ({
+      label: d.label,
+      url: `${brandUrl}?__deal=${d.index}`,
+      dealIndex: d.index,
+      brandUrl,
+    }));
+  } catch (err) {
+    console.error('[SB] getDeals error:', err.message);
+    await page.close().catch(() => {});
+    return [{ label: 'Default Deal', url: brandUrl, dealIndex: 0, brandUrl }];
+  }
+}
