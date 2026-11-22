@@ -433,48 +433,36 @@ async function getDeals(brandUrl) {
         return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
       });
 
-      // dump card HTML of first button for debugging
-      const __debugHtml = dealBtns[0] ? (() => {
-        let el = dealBtns[0];
-        for (let d = 0; d < 8 && el.parentElement; d++) el = el.parentElement;
-        return el.outerHTML.slice(0, 4000);
-      })() : '';
-
-      return { __debugHtml, deals: dealBtns.map((btn, i) => {
-        // Walk up to the smallest container that holds exactly one deal button
+      return dealBtns.map((btn, i) => {
+        // Walk up to the nearest <article> (Student Beans deal card container)
         let card = btn.parentElement;
-        for (let depth = 0; depth < 10 && card; depth++) {
-          const btnsInCard = Array.from(card.querySelectorAll('button')).filter(b => {
-            const t = b.textContent.toLowerCase();
-            return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
-          });
-          if (btnsInCard.length === 1) break;
-          card = card.parentElement;
+        while (card && card.tagName !== 'ARTICLE') card = card.parentElement;
+        // Fallback: walk up to smallest container with exactly one deal button
+        if (!card) {
+          card = btn.parentElement;
+          for (let depth = 0; depth < 10 && card; depth++) {
+            const btnsInCard = Array.from(card.querySelectorAll('button')).filter(b => {
+              const t = b.textContent.toLowerCase();
+              return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
+            });
+            if (btnsInCard.length === 1) break;
+            card = card.parentElement;
+          }
         }
         let label = null;
         if (card) {
-          const heading = card.querySelector('h1, h2, h3, h4, h5');
-          if (heading) {
-            label = heading.textContent.trim();
-          } else {
-            const btnText = btn.textContent.trim().toLowerCase();
-            for (const el of Array.from(card.querySelectorAll('p, span, div'))) {
-              const t = el.textContent.trim();
-              if (t && t.toLowerCase() !== btnText && t.length > 3 && t.length < 120) {
-                if (el.children.length === 0 || el.tagName === 'P') { label = t; break; }
-              }
-            }
-          }
+          // Student Beans uses data-testid="offer-issuance-tile-v2-title" on the h3
+          const titleEl = card.querySelector('[data-testid="offer-issuance-tile-v2-title"]') ||
+                          card.querySelector('h1, h2, h3, h4, h5');
+          if (titleEl) label = titleEl.textContent.trim();
         }
         return { label: label || `Deal ${i + 1}`, index: i };
-      }) };
+      });
     });
 
     await page.close();
-    console.log('[SB] getDeals DEBUG HTML:', deals.__debugHtml);
-    const dealList = deals.deals || deals;
-    console.log('[SB] getDeals found:', dealList.length, dealList.map(d => d.label));
-    return dealList.map(d => ({
+    console.log('[SB] getDeals found:', deals.length, deals.map(d => d.label));
+    return deals.map(d => ({
       label: d.label,
       url: `${brandUrl}?__deal=${d.index}`,
       dealIndex: d.index,
