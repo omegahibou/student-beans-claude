@@ -1,8 +1,8 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 
 const SB_BASE = 'https://www.studentbeans.com';
-const SB_LOGIN = `${SB_BASE}/login`;
-const SB_DISCOUNTS = `${SB_BASE}/student-discount/uk`;
 
 let browserInstance = null;
 let contextInstance = null;
@@ -34,23 +34,63 @@ async function login() {
   if (isLoggedIn) return { success: true, message: 'Already logged in' };
   const page = await context.newPage();
   try {
+    console.log('[SB] Navigating to login page...');
     await page.goto('https://www.studentbeans.com/login', { waitUntil: 'networkidle', timeout: 45000 });
+    console.log('[SB] Page URL after load:', page.url());
+
+    // Log full page HTML to see what we're dealing with
+    const html = await page.content();
+    console.log('[SB] Page HTML (first 2000 chars):', html.substring(0, 2000));
+
+    // Check for iframes
+    const frames = page.frames();
+    console.log('[SB] Frames on page:', frames.map(f => f.url()));
+
+    // Try consent buttons
     for (const sel of ['button:has-text("Accept all")', 'button:has-text("Accept")', '#onetrust-accept-btn-handler']) {
-      try { await page.click(sel, { timeout: 2000 }); break; } catch (_) {}
+      try { await page.click(sel, { timeout: 2000 }); console.log('[SB] Clicked consent:', sel); break; } catch (_) {}
     }
-    await page.waitForSelector('input[type="email"], input[name="email"], input[id*="email"]', { timeout: 30000 });
-    await page.fill('input[type="email"], input[name="email"], input[id*="email"]', process.env.SB_EMAIL);
-    await page.fill('input[type="password"], input[name="password"], input[id*="password"]', process.env.SB_PASSWORD);
+
+    // Wait a bit after potential consent click
+    await page.waitForTimeout(2000);
+
+    // Log HTML again after consent
+    const html2 = await page.content();
+    console.log('[SB] HTML after consent (first 2000 chars):', html2.substring(0, 2000));
+
+    // Try to find email input across all frames
+    let emailInput = null;
+    for (const frame of page.frames()) {
+      try {
+        emailInput = await frame.waitForSelector('input[type="email"], input[name="email"], input[id*="email"], input[placeholder*="email" i]', { timeout: 5000 });
+        if (emailInput) { console.log('[SB] Found email input in frame:', frame.url()); break; }
+      } catch (_) {}
+    }
+
+    if (!emailInput) {
+      // Last resort: dump all inputs
+      const inputs = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('input')).map(i => ({
+          type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, className: i.className
+        }));
+      });
+      console.log('[SB] All inputs found:', JSON.stringify(inputs));
+      throw new Error('Email input not found after full page inspection');
+    }
+
+    await emailInput.fill(process.env.SB_EMAIL);
+    const pwInput = await page.waitForSelector('input[type="password"]', { timeout: 5000 });
+    await pwInput.fill(process.env.SB_PASSWORD);
     await page.click('button[type="submit"]');
     await page.waitForURL((url) => !url.includes('/login'), { timeout: 15000 });
     isLoggedIn = true;
     await page.close();
     return { success: true, message: 'Logged in successfully' };
   } catch (err) {
-    try { console.log('[SB] Page snippet:', (await page.content()).substring(0, 800)); } catch (_) {}
+    console.log('[SB] Login error:', err.message);
     await page.close();
     isLoggedIn = false;
-    return { success: false, message: `Login failed: ${err.message}` };
+    return { success: false, message: `Login failed: ${err.message.substring(0, 300)}` };
   }
 }
 
