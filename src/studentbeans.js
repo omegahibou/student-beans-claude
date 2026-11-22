@@ -41,7 +41,7 @@ async function login() {
     isLoggedIn = true;
     return { success: true, message: 'Session loaded from cookies' };
   }
-  return { success: false, message: 'No SB_COOKIES set. Add your browser cookies as the SB_COOKIES env var in Railway.' };
+  return { success: false, message: 'No SB_COOKIES set.' };
 }
 
 async function searchRetailers(query) {
@@ -82,21 +82,37 @@ async function getCode(retailerUrl) {
     await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForFunction(() => document.body && document.body.children.length > 0, { timeout: 15000 });
     await page.waitForTimeout(2000);
+
+    // Click reveal button
     for (const sel of ['button:has-text("Get Discount")', 'button:has-text("Reveal Code")', 'button:has-text("Get Code")', 'button:has-text("Reveal")', '[data-testid*="reveal"]', 'button[class*="reveal"]', 'button[class*="discount"]']) {
-      try { await page.click(sel, { timeout: 4000 }); break; } catch (_) {}
+      try { await page.click(sel, { timeout: 4000 }); console.log('[SB] Clicked:', sel); break; } catch (_) {}
     }
     await page.waitForTimeout(2000);
+
+    // Log page text to debug what's visible
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
+    console.log('[SB] Page text:', bodyText);
+
     const code = await page.evaluate(() => {
+      // Try specific code elements first
       for (const sel of ['[data-testid*="code"]', '[class*="coupon-code"]', '[class*="promo-code"]', '[class*="discount-code"]', 'input[readonly]', '[data-code]', 'p[class*="code"]', 'span[class*="code"]']) {
         const el = document.querySelector(sel);
-        if (el) { const val = el.value || el.getAttribute('data-code') || el.textContent.trim(); if (val && val.length >= 3 && val.length <= 40 && !val.includes(' ')) return val; }
+        if (el) {
+          const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
+          if (val && val.length >= 3 && val.length <= 30 && !/\s/.test(val)) return val;
+        }
       }
-      const match = document.body.innerText.match(/\b([A-Z0-9]{4,20})\b/g);
-      if (match) { const skip = new Set(['STUDENT','BEANS','DISCOUNT','OFFER','SAVE','FREE','SHOP']); return match.find(m => !skip.has(m)) || null; }
+      // Fallback: find uppercase alphanumeric codes in page text
+      const skip = new Set(['STUDENT','BEANS','DISCOUNT','OFFER','SAVE','FREE','SHOP','GRANTED','ACCESS','VERIFY','VALID','CLAIM','LOGIN','EMAIL','APPLY','TERMS','CODE','VIEW','OPEN','BACK','NEXT','SKIP','NULL','TRUE','HTTP','HTML','HTTPS']);
+      const match = document.body.innerText.match(/\b([A-Z][A-Z0-9]{3,19})\b/g);
+      if (match) return match.find(m => !skip.has(m)) || null;
       return null;
     });
+
     const finalUrl = page.url();
+    console.log('[SB] Final URL:', finalUrl, 'Code found:', code);
     await page.close();
+
     if (code) return { code, type: 'code', url: retailerUrl };
     if (!finalUrl.includes('studentbeans.com')) return { code: null, type: 'redirect', url: finalUrl };
     return { code: null, type: 'unknown', url: retailerUrl };
