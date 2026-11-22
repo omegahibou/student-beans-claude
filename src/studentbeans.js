@@ -241,7 +241,16 @@ async function getCode(retailerUrl) {
   const page = await context.newPage();
 
   try {
-    await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(cleanUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+    // Wait for at least one deal button to be rendered (SB is JS-rendered)
+    await page.waitForFunction(() => {
+      const btns = Array.from(document.querySelectorAll('button'));
+      return btns.some(b => {
+        const t = b.textContent.toLowerCase();
+        return t.includes('get code') || t.includes('get discount') || t.includes('reveal');
+      });
+    }, { timeout: 15000 }).catch(() => console.log('[SB] waitForFunction timed out, proceeding anyway'));
 
     // Student Beans opens a NEW TAB when "Get code & open site" is clicked.
     // Set up a listener BEFORE clicking so we don't miss it.
