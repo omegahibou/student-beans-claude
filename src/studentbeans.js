@@ -8,6 +8,7 @@ let browserInstance = null;
 let contextInstance = null;
 let isLoggedIn = false;
 
+// Parse a cookie string (from browser DevTools / account storage) into Playwright cookie objects
 function parseCookieString(cookieStr) {
   if (!cookieStr) return [];
   return cookieStr.split(';').map((part) => {
@@ -24,11 +25,9 @@ function parseCookieString(cookieStr) {
   }).filter((c) => c.name && c.value);
 }
 
-/**
- * Get or create a persistent browser session
- */
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
+    console.log('[SB] Launching browser...');
     browserInstance = await chromium.launch({
       headless: true,
       args: [
@@ -38,215 +37,34 @@ async function getBrowser() {
         '--disable-gpu',
         '--no-first-run',
         '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--mute-audio',
       ],
     });
+    console.log('[SB] Browser launched');
     contextInstance = await browserInstance.newContext({
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
+      // Pre-accept cookies so the banner never blocks the page
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-GB,en;q=0.9',
+      },
     });
+    // Set cookies to bypass consent banner
+    await contextInstance.addCookies([
+      {
+        name: 'CookieConsent',
+        value: '{stamp:%27-1%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true%2Cver:1%2Cutc:1700000000000%2Cregion:%27gb%27}',
+        domain: '.studentbeans.com',
+        path: '/',
+      },
+    ]);
     isLoggedIn = false;
   }
   return { browser: browserInstance, context: contextInstance };
 }
 
-/**
- * Log in to Student Beans. Reuses the session if already logged in.
- */
-async function login() {
-  const { context } = await getBrowser();
-
-  if (isLoggedIn) return { success: true, message: 'Already logged in' };
-
-  const page = await context.newPage();
-  try {
-    await page.goto(SB_LOGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    // Accept cookies if banner appears
-    try {
-      await page.click('button:has-text("Accept")', { timeout: 5000 });
-    } catch (_) {}
-
-    await page.fill('input[type="email"], input[name="email"]', process.env.SB_EMAIL);
-    await page.fill('input[type="password"], input[name="password"]', process.env.SB_PASSWORD);
-    await page.click('button[type="submit"]');
-
-    await page.waitForURL((url) => !url.includes('/login'), { timeout: 15000 });
-
-    isLoggedIn = true;
-    await page.close();
-    return { success: true, message: 'Logged in successfully' };
-  } catch (err) {
-    await page.close();
-    isLoggedIn = false;
-    return { success: false, message: `Login failed: ${err.message}` };
-  }
-}
-
-/**
- * Search for retailers matching a query and return a list of matches.
- */
-async function searchRetailers(query) {
-  const { context } = await getBrowser();
-  const page = await context.newPage();
-
-  try {
-    const searchUrl = `${SB_DISCOUNTS}?q=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    await page.waitForSelector('a[href*="/student-discount/uk/"]', { timeout: 10000 }).catch(() => {});
-
-    const results = await page.evaluate(() => {
-      const cards = document.querySelectorAll('a[href*="/student-discount/uk/"]');
-      const seen = new Set();
-      const items = [];
-      for (const card of cards) {
-        const href = card.getAttribute('href');
-        if (href && href.includes('/student-discount/uk/') && !seen.has(href)) {
-          seen.add(href);
-          const nameEl = card.querySelector('h2, h3, [class*="brand"], [class*="name"], [class*="title"]');
-          const name = nameEl ? nameEl.textContent.trim() : card.textContent.trim().split('\n')[0].trim();
-          if (name && name.length > 0 && name.length < 60) {
-            items.push({ name, url: `https://www.studentbeans.com${href}` });
-          }
-        }
-      }
-      return items.slice(0, 8);
-    });
-
-    await page.close();
-    return results;
-  } catch (err) {
-    await page.close();
-    throw new Error(`Search failed: ${err.message}`);
-  }
-}
-
-/**
- * Fetch a discount code from a specific retailer page URL.
- */
-async function getCode(retailerUrl) {
-  const loginResult = await login();
-  if (!loginResult.success) throw new Error(loginResult.message);
-
-  const { context } = await getBrowser();
-  const page = await context.newPage();
-
-  try {
-    await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    try {
-      await page.click('button:has-text("Accept")', { timeout: 3000 });
-    } catch (_) {}
-
-    const buttonSelectors = [
-      'button:has-text("Get Discount")',
-      'button:has-text("Reveal Code")',
-      'button:has-text("Get Code")',
-      'button:has-text("Reveal")',
-      '[data-testid*="reveal"]',
-      '[data-testid*="get-discount"]',
-      'button[class*="reveal"]',
-      'button[class*="discount"]',
-    ];
-
-    let clicked = false;
-    for (const sel of buttonSelectors) {
-      try {
-        await page.click(sel, { timeout: 4000 });
-        clicked = true;
-        break;
-      } catch (_) {}
-    }
-
-    if (!clicked) {
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const target = btns.find(
-          (b) =>
-            b.textContent.toLowerCase().includes('discount') ||
-            b.textContent.toLowerCase().includes('code') ||
-            b.textContent.toLowerCase().includes('reveal')
-        );
-        if (target) target.click();
-      });
-    }
-
-    await page.waitForTimeout(2000);
-
-    const code = await page.evaluate(() => {
-      const codeSelectors = [
-        '[data-testid*="code"]',
-        '[class*="coupon-code"]',
-        '[class*="promo-code"]',
-        '[class*="discount-code"]',
-        '[class*="voucher-code"]',
-        'input[readonly]',
-        'code',
-        '[aria-label*="code"]',
-        '[data-code]',
-        '[class*="code-box"]',
-        '[class*="codebox"]',
-        'p[class*="code"]',
-        'span[class*="code"]',
-      ];
-
-      for (const sel of codeSelectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
-          if (val && val.length >= 3 && val.length <= 40 && !val.includes(' ')) {
-            return val;
-          }
-        }
-      }
-
-      const allText = document.body.innerText;
-      const match = allText.match(/\b([A-Z0-9]{4,20})\b/g);
-      if (match) {
-        const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP']);
-        const code = match.find((m) => !skip.has(m));
-        return code || null;
-      }
-      return null;
-    });
-
-    const finalUrl = page.url();
-    const wasRedirected = !finalUrl.includes('studentbeans.com');
-
-    await page.close();
-
-    if (code) {
-      return { code, type: 'code', url: retailerUrl };
-    } else if (wasRedirected) {
-      return { code: null, type: 'redirect', url: finalUrl };
-    } else {
-      return { code: null, type: 'unknown', url: retailerUrl };
-    }
-  } catch (err) {
-    await page.close();
-    throw new Error(`Failed to get code: ${err.message}`);
-  }
-}
-
-async function closeBrowser() {
-  if (browserInstance) {
-    await browserInstance.close();
-    browserInstance = null;
-    contextInstance = null;
-    isLoggedIn = false;
-  }
-}
-
-function resetSession() {
-  isLoggedIn = false;
-}
-
-module.exports = { login, searchRetailers, getDeals, getCode, closeBrowser, resetSession, setCookies, testCookies };
-
+// Inject cookies into the existing browser context without killing the browser.
+// Call this before a search when switching accounts.
 async function setCookies(cookieStr) {
   if (!cookieStr) return;
   const { context } = await getBrowser();
@@ -272,6 +90,303 @@ async function setCookies(cookieStr) {
   console.log(`[SB] setCookies: injected ${cookies.length} cookies`);
 }
 
+async function login() {
+  console.log('[SB] login() called, isLoggedIn=', isLoggedIn);
+  const { context } = await getBrowser();
+
+  if (isLoggedIn) return { success: true, message: 'Already logged in' };
+
+  const page = await context.newPage();
+  try {
+    console.log('[SB] Navigating to login page...');
+    await page.goto(SB_LOGIN, { waitUntil: 'networkidle', timeout: 45000 });
+    console.log('[SB] Login page loaded, URL:', page.url());
+
+    // Dismiss any cookie/consent banners
+    const consentSelectors = [
+      'button:has-text("Accept all")',
+      'button:has-text("Accept All")',
+      'button:has-text("Accept")',
+      'button:has-text("Allow all")',
+      '#onetrust-accept-btn-handler',
+      '[id*="accept"]',
+      '[class*="accept"]',
+    ];
+    for (const sel of consentSelectors) {
+      try {
+        await page.click(sel, { timeout: 2000 });
+        console.log('[SB] Dismissed consent banner:', sel);
+        await page.waitForTimeout(500);
+        break;
+      } catch (_) {}
+    }
+
+    // Wait for the email input to appear
+    console.log('[SB] Waiting for email input...');
+    await page.waitForSelector('input[type="email"], input[name="email"], input[id*="email"]', { timeout: 30000 });
+    console.log('[SB] Email input found');
+
+    await page.fill('input[type="email"], input[name="email"], input[id*="email"]', process.env.SB_EMAIL);
+    await page.fill('input[type="password"], input[name="password"], input[id*="password"]', process.env.SB_PASSWORD);
+
+    console.log('[SB] Submitting login form...');
+    await page.click('button[type="submit"]');
+
+    await page.waitForURL((url) => !url.includes('/login'), { timeout: 15000 });
+    console.log('[SB] Logged in! URL now:', page.url());
+
+    isLoggedIn = true;
+    await page.close();
+    return { success: true, message: 'Logged in successfully' };
+  } catch (err) {
+    // Take a screenshot to debug what the page looks like
+    try {
+      const html = await page.content();
+      console.log('[SB] Page HTML snippet:', html.substring(0, 500));
+    } catch (_) {}
+    console.error('[SB] Login error:', err.message);
+    await page.close();
+    isLoggedIn = false;
+    return { success: false, message: `Login failed: ${err.message}` };
+  }
+}
+
+// Convert a user query into a URL slug: lowercase, spaces→hyphens, strip specials
+function toSlug(query) {
+  return query.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+async function searchRetailers(query) {
+  if (query === '__warmup__') return [];
+  console.log('[SB] searchRetailers:', query);
+  const { context } = await getBrowser();
+
+  // Strategy 1: try the direct brand URL (e.g. /student-discount/uk/asos)
+  const slug = toSlug(query);
+  const directUrl = `${SB_BASE}/student-discount/uk/${slug}`;
+  console.log('[SB] Trying direct URL:', directUrl);
+
+  const page = await context.newPage();
+  try {
+    const response = await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const finalUrl = page.url();
+    const status = response ? response.status() : 0;
+
+    // If the page loaded and didn't redirect to a 404/error page, use it
+    if (status < 400 && finalUrl.includes('/student-discount/uk/') && !finalUrl.includes('/uk/cats') && !finalUrl.includes('/uk?')) {
+      // Extract the brand name from the page title or h1
+      const name = await page.evaluate((fallback) => {
+        const h1 = document.querySelector('h1');
+        if (h1) {
+          // Strip common suffixes like "Student Discount | ..."
+          return h1.textContent.trim().replace(/\s*student discount.*/i, '').trim() || fallback;
+        }
+        return document.title.replace(/\s*student discount.*/i, '').replace(/\s*\|.*/, '').trim() || fallback;
+      }, query);
+      await page.close();
+      console.log('[SB] Direct URL hit:', name, directUrl);
+      return [{ name, url: directUrl }];
+    }
+
+    // Strategy 2: direct URL failed — try the all-brands listing page and search there
+    console.log('[SB] Direct URL miss (status', status, '), trying brands listing');
+    await page.goto(`${SB_BASE}/student-discount/uk/brands`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    const results = await page.evaluate((q) => {
+      const links = Array.from(document.querySelectorAll('a[href*="/student-discount/uk/"]'));
+      const ql = q.toLowerCase();
+      const seen = new Set();
+      const items = [];
+      for (const a of links) {
+        const href = a.getAttribute('href') || '';
+        // Skip category/collection pages
+        if (href.includes('/cats') || href.includes('/collections') || href.includes('/brands')) continue;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const text = a.textContent.trim().toLowerCase();
+        const slug = href.split('/').pop();
+        if (text.includes(ql) || slug.includes(ql)) {
+          items.push({ name: a.textContent.trim().split('\n')[0].trim(), url: `https://www.studentbeans.com${href}` });
+        }
+      }
+      return items.slice(0, 5);
+    }, query);
+
+    await page.close();
+    console.log('[SB] Brands listing results:', results.length);
+    return results;
+  } catch (err) {
+    console.error('[SB] searchRetailers error:', err.message);
+    await page.close().catch(() => {});
+    throw new Error(`Search failed: ${err.message}`);
+  }
+}
+
+async function getCode(retailerUrl) {
+  console.log('[SB] getCode:', retailerUrl);
+  const loginResult = await login();
+  if (!loginResult.success) throw new Error(loginResult.message);
+
+  const { context } = await getBrowser();
+  const page = await context.newPage();
+
+  try {
+    await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Student Beans opens a NEW TAB when "Get code & open site" is clicked.
+    // Set up a listener BEFORE clicking so we don't miss it.
+    const newPagePromise = context.waitForEvent('page', { timeout: 15000 }).catch(() => null);
+
+    const buttonSelectors = [
+      'button:has-text("Get code & open site")',
+      'button:has-text("Get Code")',
+      'button:has-text("Get Discount")',
+      'button:has-text("Reveal Code")',
+      'button:has-text("Reveal")',
+      '[data-testid*="reveal"]',
+      '[data-testid*="get-discount"]',
+      'button[class*="reveal"]',
+      'button[class*="discount"]',
+    ];
+
+    let clicked = false;
+    for (const sel of buttonSelectors) {
+      try {
+        await page.click(sel, { timeout: 4000 });
+        clicked = true;
+        console.log('[SB] Clicked:', sel);
+        break;
+      } catch (_) {}
+    }
+
+    if (!clicked) {
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const target = btns.find(
+          (b) =>
+            b.textContent.toLowerCase().includes('get code') ||
+            b.textContent.toLowerCase().includes('discount') ||
+            b.textContent.toLowerCase().includes('reveal')
+        );
+        if (target) target.click();
+      });
+    }
+
+    // Wait for the new tab that Student Beans opens with the actual code
+    const newPage = await newPagePromise;
+
+    let code = null;
+
+    if (newPage) {
+      console.log('[SB] New tab opened:', newPage.url());
+      await newPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+      await newPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+
+      code = await newPage.evaluate(() => {
+        // Primary target: the dashed-border animated button containing the code
+        // e.g. <button class="...animate-offerPop...border-dashed..."><p>STB27YQ80KP8O</p></button>
+        const offerBtn = document.querySelector('button[class*="animate-offerPop"] p') ||
+                         document.querySelector('button[class*="border-dashed"] p') ||
+                         document.querySelector('button[class*="offerPop"]');
+        if (offerBtn) {
+          const val = offerBtn.textContent.trim();
+          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+        }
+
+        // Fallback selectors
+        const fallbackSelectors = [
+          '[data-testid*="code"]',
+          '[class*="coupon-code"]',
+          '[class*="promo-code"]',
+          '[class*="discount-code"]',
+          '[class*="voucher-code"]',
+          'input[readonly]',
+          '[data-code]',
+          '[class*="code-box"]',
+          '[class*="codebox"]',
+        ];
+        for (const sel of fallbackSelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
+            if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+          }
+        }
+
+        // Last resort: scan body text for an uppercase code pattern
+        if (!document.body) return null;
+        const match = document.body.innerText.match(/\b([A-Z0-9]{6,20})\b/g);
+        if (match) {
+          const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
+          return match.find((m) => !skip.has(m)) || null;
+        }
+        return null;
+      });
+
+      console.log('[SB] Code from new tab:', code);
+      await newPage.close().catch(() => {});
+    } else {
+      // No new tab — try reading the code from the current page
+      console.log('[SB] No new tab, reading from current page');
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() =>
+        page.waitForTimeout(2500)
+      );
+      code = await page.evaluate(() => {
+        const offerBtn = document.querySelector('button[class*="animate-offerPop"] p') ||
+                         document.querySelector('button[class*="border-dashed"] p');
+        if (offerBtn) {
+          const val = offerBtn.textContent.trim();
+          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+        }
+        if (!document.body) return null;
+        const match = document.body.innerText.match(/\b([A-Z0-9]{6,20})\b/g);
+        if (match) {
+          const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
+          return match.find((m) => !skip.has(m)) || null;
+        }
+        return null;
+      });
+    }
+
+    console.log('[SB] Code found:', code);
+    const finalUrl = page.url();
+    const wasRedirected = !finalUrl.includes('studentbeans.com');
+    await page.close().catch(() => {});
+
+    if (code) {
+      return { code, type: 'code', url: retailerUrl };
+    } else if (wasRedirected) {
+      return { code: null, type: 'redirect', url: finalUrl };
+    } else {
+      return { code: null, type: 'unknown', url: retailerUrl };
+    }
+  } catch (err) {
+    console.error('[SB] getCode error:', err.message);
+    await page.close().catch(() => {});
+    throw new Error(`Failed to get code: ${err.message}`);
+  }
+}
+
+async function closeBrowser() {
+  if (browserInstance) {
+    await browserInstance.close();
+    browserInstance = null;
+    contextInstance = null;
+    isLoggedIn = false;
+  }
+}
+
+function resetSession() {
+  isLoggedIn = false;
+  if (browserInstance) {
+    browserInstance.close().catch(() => {});
+    browserInstance = null;
+    contextInstance = null;
+  }
+}
+
+// ── Test cookies (used by account manager) ────────────────────────────────────
+// Reuses the warm browser rather than spinning up a fresh one
 async function testCookies(cookieStr) {
   if (!cookieStr) return false;
   // Inject the cookies into the shared context and try to load a protected page
@@ -300,13 +415,16 @@ async function testCookies(cookieStr) {
   }
 }
 
-// Returns array of { label, url } where url has ?__deal=N appended so getCode knows which to click.
+module.exports = { login, searchRetailers, getDeals, getCode, closeBrowser, resetSession, setCookies, testCookies };
+
+// Returns array of { label, url, dealIndex, brandUrl } for each deal card on a brand page.
+// url has ?__deal=N appended so getCode knows which button to click.
 async function getDeals(brandUrl) {
   console.log('[SB] getDeals:', brandUrl);
   const { context } = await getBrowser();
   const page = await context.newPage();
   try {
-    // networkidle gives React time to render deal cards (domcontentloaded is too early)
+    // networkidle gives React time to render deal cards (domcontentloaded fires too early)
     await page.goto(brandUrl, { waitUntil: 'networkidle', timeout: 25000 });
     const deals = await page.evaluate(() => {
       const buttons = Array.from(document.querySelectorAll('button'));
@@ -316,7 +434,7 @@ async function getDeals(brandUrl) {
       });
 
       return dealBtns.map((btn, i) => {
-        // Find the card container: walk up until we find an element with only this one deal button
+        // Walk up to the smallest container that holds exactly one deal button
         let card = btn.parentElement;
         for (let depth = 0; depth < 10 && card; depth++) {
           const btnsInCard = Array.from(card.querySelectorAll('button')).filter(b => {
@@ -333,14 +451,10 @@ async function getDeals(brandUrl) {
             label = heading.textContent.trim();
           } else {
             const btnText = btn.textContent.trim().toLowerCase();
-            const textEls = Array.from(card.querySelectorAll('p, span, div'));
-            for (const el of textEls) {
+            for (const el of Array.from(card.querySelectorAll('p, span, div'))) {
               const t = el.textContent.trim();
               if (t && t.toLowerCase() !== btnText && t.length > 3 && t.length < 120) {
-                if (el.children.length === 0 || el.tagName === 'P') {
-                  label = t;
-                  break;
-                }
+                if (el.children.length === 0 || el.tagName === 'P') { label = t; break; }
               }
             }
           }
