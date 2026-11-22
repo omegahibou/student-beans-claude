@@ -267,7 +267,12 @@ async function getCode(retailerUrl) {
       });
     }
 
-    await page.waitForTimeout(2000);
+    // Wait for the page to settle after clicking — the button may trigger a
+    // navigation or modal load. Use networkidle with a short timeout so we
+    // don't hang, then fall back to a plain 2 s pause.
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() =>
+      page.waitForTimeout(2500)
+    );
 
     const code = await page.evaluate(() => {
       const codeSelectors = [
@@ -296,6 +301,8 @@ async function getCode(retailerUrl) {
         }
       }
 
+      // Guard against document.body being null mid-navigation
+      if (!document.body) return null;
       const allText = document.body.innerText;
       const match = allText.match(/\b([A-Z0-9]{4,20})\b/g);
       if (match) {
