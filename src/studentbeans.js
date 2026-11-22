@@ -233,10 +233,15 @@ async function getCode(retailerUrl) {
   try {
     await page.goto(retailerUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
+    // Student Beans opens a NEW TAB when "Get code & open site" is clicked.
+    // Set up a listener BEFORE clicking so we don't miss it.
+    const newPagePromise = context.waitForEvent('page', { timeout: 15000 }).catch(() => null);
+
     const buttonSelectors = [
+      'button:has-text("Get code & open site")',
+      'button:has-text("Get Code")',
       'button:has-text("Get Discount")',
       'button:has-text("Reveal Code")',
-      'button:has-text("Get Code")',
       'button:has-text("Reveal")',
       '[data-testid*="reveal"]',
       '[data-testid*="get-discount"]',
@@ -259,64 +264,94 @@ async function getCode(retailerUrl) {
         const btns = Array.from(document.querySelectorAll('button'));
         const target = btns.find(
           (b) =>
+            b.textContent.toLowerCase().includes('get code') ||
             b.textContent.toLowerCase().includes('discount') ||
-            b.textContent.toLowerCase().includes('code') ||
             b.textContent.toLowerCase().includes('reveal')
         );
         if (target) target.click();
       });
     }
 
-    // Wait for the page to settle after clicking — the button may trigger a
-    // navigation or modal load. Use networkidle with a short timeout so we
-    // don't hang, then fall back to a plain 2 s pause.
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() =>
-      page.waitForTimeout(2500)
-    );
+    // Wait for the new tab that Student Beans opens with the actual code
+    const newPage = await newPagePromise;
 
-    const code = await page.evaluate(() => {
-      const codeSelectors = [
-        '[data-testid*="code"]',
-        '[class*="coupon-code"]',
-        '[class*="promo-code"]',
-        '[class*="discount-code"]',
-        '[class*="voucher-code"]',
-        'input[readonly]',
-        'code',
-        '[aria-label*="code"]',
-        '[data-code]',
-        '[class*="code-box"]',
-        '[class*="codebox"]',
-        'p[class*="code"]',
-        'span[class*="code"]',
-      ];
+    let code = null;
 
-      for (const sel of codeSelectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
-          if (val && val.length >= 3 && val.length <= 40 && !val.includes(' ')) {
-            return val;
+    if (newPage) {
+      console.log('[SB] New tab opened:', newPage.url());
+      await newPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+      await newPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+
+      code = await newPage.evaluate(() => {
+        // Primary target: the dashed-border animated button containing the code
+        // e.g. <button class="...animate-offerPop...border-dashed..."><p>STB27YQ80KP8O</p></button>
+        const offerBtn = document.querySelector('button[class*="animate-offerPop"] p') ||
+                         document.querySelector('button[class*="border-dashed"] p') ||
+                         document.querySelector('button[class*="offerPop"]');
+        if (offerBtn) {
+          const val = offerBtn.textContent.trim();
+          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+        }
+
+        // Fallback selectors
+        const fallbackSelectors = [
+          '[data-testid*="code"]',
+          '[class*="coupon-code"]',
+          '[class*="promo-code"]',
+          '[class*="discount-code"]',
+          '[class*="voucher-code"]',
+          'input[readonly]',
+          '[data-code]',
+          '[class*="code-box"]',
+          '[class*="codebox"]',
+        ];
+        for (const sel of fallbackSelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const val = el.value || el.getAttribute('data-code') || el.textContent.trim();
+            if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
           }
         }
-      }
 
-      // Guard against document.body being null mid-navigation
-      if (!document.body) return null;
-      const allText = document.body.innerText;
-      const match = allText.match(/\b([A-Z0-9]{4,20})\b/g);
-      if (match) {
-        const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP']);
-        const code = match.find((m) => !skip.has(m));
-        return code || null;
-      }
-      return null;
-    });
+        // Last resort: scan body text for an uppercase code pattern
+        if (!document.body) return null;
+        const match = document.body.innerText.match(/\b([A-Z0-9]{6,20})\b/g);
+        if (match) {
+          const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
+          return match.find((m) => !skip.has(m)) || null;
+        }
+        return null;
+      });
+
+      console.log('[SB] Code from new tab:', code);
+      await newPage.close().catch(() => {});
+    } else {
+      // No new tab — try reading the code from the current page
+      console.log('[SB] No new tab, reading from current page');
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() =>
+        page.waitForTimeout(2500)
+      );
+      code = await page.evaluate(() => {
+        const offerBtn = document.querySelector('button[class*="animate-offerPop"] p') ||
+                         document.querySelector('button[class*="border-dashed"] p');
+        if (offerBtn) {
+          const val = offerBtn.textContent.trim();
+          if (val && val.length >= 4 && val.length <= 40 && !/\s/.test(val)) return val;
+        }
+        if (!document.body) return null;
+        const match = document.body.innerText.match(/\b([A-Z0-9]{6,20})\b/g);
+        if (match) {
+          const skip = new Set(['STUDENT', 'BEANS', 'DISCOUNT', 'OFFER', 'SAVE', 'FREE', 'SHOP', 'ONLINE', 'GRANTED', 'VERIFIED']);
+          return match.find((m) => !skip.has(m)) || null;
+        }
+        return null;
+      });
+    }
 
     console.log('[SB] Code found:', code);
     const finalUrl = page.url();
     const wasRedirected = !finalUrl.includes('studentbeans.com');
-    await page.close();
+    await page.close().catch(() => {});
 
     if (code) {
       return { code, type: 'code', url: retailerUrl };
@@ -327,7 +362,7 @@ async function getCode(retailerUrl) {
     }
   } catch (err) {
     console.error('[SB] getCode error:', err.message);
-    await page.close();
+    await page.close().catch(() => {});
     throw new Error(`Failed to get code: ${err.message}`);
   }
 }
