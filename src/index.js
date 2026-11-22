@@ -153,12 +153,16 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   const guildId = process.env.GUILD_ID;
-  if (guildId) {
-    await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-    console.log(`✅ Guild commands registered`);
-  } else {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('✅ Global commands registered');
+  try {
+    if (guildId) {
+      await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
+      console.log(`✅ Guild commands registered`);
+    } else {
+      await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+      console.log('✅ Global commands registered');
+    }
+  } catch (err) {
+    console.error('⚠️ Command registration failed (non-fatal):', err.message);
   }
 
   // Log loaded accounts
