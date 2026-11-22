@@ -22,6 +22,8 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 // ── In-memory stores ──────────────────────────────────────────────────────────
 const favourites = new Map();
 const recent = new Map();
+// Track which account index each user is currently using
+// Falls back to account 1 (or whichever is first) if not set
 const userAccount = new Map();
 
 function getFavs(userId) {
@@ -96,8 +98,10 @@ function buildAccountsEmbed(accounts, activeIndex) {
 function buildAccountsComponents(accounts, activeIndex) {
   const rows = [];
 
+  // Account selection buttons (up to 4 per row)
   if (accounts.length > 0) {
-    const row = new ActionRowBuilder();
+    let row = new ActionRowBuilder();
+    let count = 0;
     for (const a of accounts.slice(0, 4)) {
       const isActive = a.index === activeIndex;
       row.addComponents(
@@ -106,10 +110,12 @@ function buildAccountsComponents(accounts, activeIndex) {
           .setLabel(a.name.slice(0, 20))
           .setStyle(isActive ? ButtonStyle.Primary : ButtonStyle.Secondary)
       );
+      count++;
     }
     rows.push(row);
   }
 
+  // Action buttons
   const actionRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('sb_acct_add').setLabel('➕ Add Account').setStyle(ButtonStyle.Success),
   );
@@ -152,9 +158,11 @@ client.once('ready', async () => {
     console.log('✅ Global commands registered');
   }
 
+  // Log loaded accounts
   const accounts = accts.loadAccounts();
   console.log(`📋 Loaded ${accounts.length} account(s):`, accounts.map(a => a.name).join(', ') || 'none');
 
+  // Use legacy SB_COOKIES as account 1 if no accounts configured yet
   if (accounts.length === 0 && process.env.SB_COOKIES) {
     console.log('⚡ Using legacy SB_COOKIES as default account');
   }
@@ -163,11 +171,13 @@ client.once('ready', async () => {
 // ── Interaction router ────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
+  // /sb-panel
   if (interaction.isChatInputCommand() && interaction.commandName === 'sb-panel') {
     await interaction.reply(buildPanel());
     return;
   }
 
+  // /sb-login
   if (interaction.isChatInputCommand() && interaction.commandName === 'sb-login') {
     await interaction.deferReply({ flags: 64 });
     sb.resetSession();
@@ -266,6 +276,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Select an account to view its details
   if (interaction.isButton() && interaction.customId.startsWith('sb_acct_select_')) {
     const index = parseInt(interaction.customId.replace('sb_acct_select_', ''));
     const accounts = accts.loadAccounts();
@@ -279,6 +290,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Add account — show modal
   if (interaction.isButton() && interaction.customId === 'sb_acct_add') {
     const modal = new ModalBuilder().setCustomId('sb_acct_add_modal').setTitle('Add Student Beans Account');
     modal.addComponents(
@@ -296,6 +308,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Add account modal submit
   if (interaction.isModalSubmit() && interaction.customId === 'sb_acct_add_modal') {
     await interaction.deferReply({ flags: 64 });
     const name = interaction.fields.getTextInputValue('sb_acct_name');
@@ -310,6 +323,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Rename account — show modal
   if (interaction.isButton() && interaction.customId.startsWith('sb_acct_rename_')) {
     const index = parseInt(interaction.customId.replace('sb_acct_rename_', ''));
     const modal = new ModalBuilder().setCustomId(`sb_acct_rename_modal_${index}`).setTitle('Rename Account');
@@ -321,6 +335,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Rename modal submit
   if (interaction.isModalSubmit() && interaction.customId.startsWith('sb_acct_rename_modal_')) {
     await interaction.deferReply({ flags: 64 });
     const index = parseInt(interaction.customId.replace('sb_acct_rename_modal_', ''));
@@ -335,6 +350,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Update cookies — show modal
   if (interaction.isButton() && interaction.customId.startsWith('sb_acct_updatecookies_')) {
     const index = parseInt(interaction.customId.replace('sb_acct_updatecookies_', ''));
     const modal = new ModalBuilder().setCustomId(`sb_acct_cookies_modal_${index}`).setTitle('Update Cookies');
@@ -347,6 +363,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Update cookies modal submit
   if (interaction.isModalSubmit() && interaction.customId.startsWith('sb_acct_cookies_modal_')) {
     await interaction.deferReply({ flags: 64 });
     const index = parseInt(interaction.customId.replace('sb_acct_cookies_modal_', ''));
@@ -361,7 +378,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  if (interaction.isButton() && interaction.customId.startsWith('sb_acct_test_') && !interaction.customId.includes('all')) {
+  // Test single account
+  if (interaction.isButton() && interaction.customId.startsWith('sb_acct_test_')) {
     const index = parseInt(interaction.customId.replace('sb_acct_test_', ''));
     await interaction.deferReply({ flags: 64 });
     await interaction.editReply({ content: `🔄 Testing account... (~15 seconds)` });
@@ -377,6 +395,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Test all accounts
   if (interaction.isButton() && interaction.customId === 'sb_acct_test_all') {
     await interaction.deferReply({ flags: 64 });
     const accounts = accts.loadAccounts();
@@ -391,6 +410,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Remove account
   if (interaction.isButton() && interaction.customId.startsWith('sb_acct_remove_')) {
     const index = parseInt(interaction.customId.replace('sb_acct_remove_', ''));
     await interaction.deferReply({ flags: 64 });
@@ -428,6 +448,7 @@ async function fetchAndShowCode(interaction, query) {
     components: [],
   });
 
+  // Pick cookies: use account system if available, fall back to legacy SB_COOKIES
   const account = getActiveAccount(interaction.user.id);
   const cookiesToUse = account ? account.cookies : process.env.SB_COOKIES;
   if (!cookiesToUse) {
@@ -435,20 +456,17 @@ async function fetchAndShowCode(interaction, query) {
     return;
   }
 
-  const originalCookies = process.env.SB_COOKIES;
-  process.env.SB_COOKIES = cookiesToUse;
-  sb.resetSession();
+  // Inject cookies into the warm browser — no browser restart needed
+  await sb.setCookies(cookiesToUse);
 
   let retailers;
   try { retailers = await sb.searchRetailers(query); }
   catch (err) {
-    process.env.SB_COOKIES = originalCookies;
     await interaction.editReply({ embeds: [errEmbed('Search failed', err.message)], components: [] });
     return;
   }
 
   if (!retailers || retailers.length === 0) {
-    process.env.SB_COOKIES = originalCookies;
     await interaction.editReply({
       embeds: [new EmbedBuilder().setTitle('❌ Not found').setDescription(`No results for **${query}**. Try a different spelling.`).setColor(0xff0000)],
       components: [],
@@ -462,12 +480,9 @@ async function fetchAndShowCode(interaction, query) {
   let result;
   try { result = await sb.getCode(retailer.url); }
   catch (err) {
-    process.env.SB_COOKIES = originalCookies;
     await interaction.editReply({ embeds: [errEmbed('Failed to get code', err.message)], components: [] });
     return;
   }
-
-  process.env.SB_COOKIES = originalCookies;
 
   const isFav = getFavs(interaction.user.id).has(slug);
   const favBtn = new ButtonBuilder()
