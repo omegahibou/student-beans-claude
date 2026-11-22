@@ -8,6 +8,22 @@ let browserInstance = null;
 let contextInstance = null;
 let isLoggedIn = false;
 
+function parseCookieString(cookieStr) {
+  if (!cookieStr) return [];
+  return cookieStr.split(';').map((part) => {
+    const [name, ...rest] = part.trim().split('=');
+    return {
+      name: name.trim(),
+      value: rest.join('=').trim(),
+      domain: '.studentbeans.com',
+      path: '/',
+      httpOnly: false,
+      secure: true,
+      sameSite: 'None',
+    };
+  }).filter((c) => c.name && c.value);
+}
+
 /**
  * Get or create a persistent browser session
  */
